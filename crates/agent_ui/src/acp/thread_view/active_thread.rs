@@ -2925,14 +2925,18 @@ impl AcpThreadView {
         //     return None;
         // }
 
-        let (tooltip_label, color) = if matches!(thread.speed(), Some(Speed::Fast)) {
-            ("Disable Fast Mode", Color::Accent)
+        let (tooltip_label, color, icon) = if matches!(thread.speed(), Some(Speed::Fast)) {
+            ("Disable Fast Mode", Color::Muted, IconName::FastForward)
         } else {
-            ("Enable Fast Mode", Color::Muted)
+            (
+                "Enable Fast Mode",
+                Color::Custom(cx.theme().colors().icon_disabled.opacity(0.8)),
+                IconName::FastForwardOff,
+            )
         };
 
         Some(
-            IconButton::new("fast-mode", IconName::BoltFilled)
+            IconButton::new("fast-mode", icon)
                 .icon_size(IconSize::Small)
                 .icon_color(color)
                 .tooltip(Tooltip::text(tooltip_label))
