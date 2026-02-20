@@ -1,8 +1,8 @@
 use crate::{
-    AgentGitWorktreeInfo, ContextServerRegistry, CopyPathTool, CreateDirectoryTool,
-    DbLanguageModel, DbThread, DeletePathTool, DiagnosticsTool, EditFileTool, FetchTool,
-    FindPathTool, GrepTool, ListDirectoryTool, MovePathTool, NowTool, OpenTool, ProjectSnapshot,
-    ReadFileTool, RestoreFileFromDiskTool, SaveFileTool, StreamingEditFileTool, SubagentTool,
+    ContextServerRegistry, CopyPathTool, CreateDirectoryTool, DbLanguageModel, DbThread,
+    DeletePathTool, DiagnosticsTool, EditFileTool, FetchTool, FindPathTool, GrepTool,
+    ListDirectoryTool, MovePathTool, NowTool, OpenTool, ProjectSnapshot, ReadFileTool,
+    RestoreFileFromDiskTool, SaveFileTool, StreamingEditFileTool, SubagentTool,
     SystemPromptTemplate, Template, Templates, TerminalTool, ToolPermissionDecision, WebSearchTool,
     decide_permission_from_settings,
 };
@@ -890,8 +890,6 @@ pub struct Thread {
     subagent_context: Option<SubagentContext>,
     /// Weak references to running subagent threads for cancellation propagation
     running_subagents: Vec<WeakEntity<Thread>>,
-    /// Git worktree info if this thread is running in an agent worktree.
-    git_worktree_info: Option<AgentGitWorktreeInfo>,
 }
 
 impl Thread {
@@ -982,7 +980,6 @@ impl Thread {
             imported: false,
             subagent_context: None,
             running_subagents: Vec::new(),
-            git_worktree_info: None,
         }
     }
 
@@ -1207,7 +1204,6 @@ impl Thread {
             imported: db_thread.imported,
             subagent_context: db_thread.subagent_context,
             running_subagents: Vec::new(),
-            git_worktree_info: db_thread.git_worktree_info,
         }
     }
 
@@ -1228,7 +1224,6 @@ impl Thread {
             profile: Some(self.profile_id.clone()),
             imported: self.imported,
             subagent_context: self.subagent_context.clone(),
-            git_worktree_info: self.git_worktree_info.clone(),
         };
 
         cx.background_spawn(async move {
