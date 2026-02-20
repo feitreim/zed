@@ -221,6 +221,12 @@
       "title": "git_ui: Add diff stat numbers in Branch Diff view",
       "file": "suggestions/PR-49716.md",
       "date": "2026-02-20T16:43:56Z"
+    },
+    {
+      "pr": 49732,
+      "title": "agent: Tweak subagent input params and docs",
+      "file": "suggestions/PR-49732.md",
+      "date": "2026-02-20T16:49:30Z"
     }
   ]
 }
