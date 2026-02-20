@@ -215,6 +215,12 @@
       "title": "git_ui: Refine display of the \"Review Diff\" button",
       "file": "suggestions/PR-49710.md",
       "date": "2026-02-20T12:28:24Z"
+    },
+    {
+      "pr": 49716,
+      "title": "git_ui: Add diff stat numbers in Branch Diff view",
+      "file": "suggestions/PR-49716.md",
+      "date": "2026-02-20T16:43:56Z"
     }
   ]
 }
