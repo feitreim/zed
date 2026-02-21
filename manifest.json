@@ -227,6 +227,12 @@
       "title": "agent: Tweak subagent input params and docs",
       "file": "suggestions/PR-49732.md",
       "date": "2026-02-20T16:49:30Z"
+    },
+    {
+      "pr": 49788,
+      "title": "Improve ETW profiler action",
+      "file": "suggestions/PR-49788.md",
+      "date": "2026-02-21T06:13:19Z"
     }
   ]
 }
