@@ -239,6 +239,12 @@
       "title": "git_graph: Improve commit detail panel UI",
       "file": "suggestions/PR-49876.md",
       "date": "2026-02-23T12:46:47Z"
+    },
+    {
+      "pr": 49902,
+      "title": "agent: Subagent low context warnings",
+      "file": "suggestions/PR-49902.md",
+      "date": "2026-02-23T16:05:18Z"
     }
   ]
 }
