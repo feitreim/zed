@@ -233,6 +233,12 @@
       "title": "Improve ETW profiler action",
       "file": "suggestions/PR-49788.md",
       "date": "2026-02-21T06:13:19Z"
+    },
+    {
+      "pr": 49876,
+      "title": "git_graph: Improve commit detail panel UI",
+      "file": "suggestions/PR-49876.md",
+      "date": "2026-02-23T12:46:47Z"
     }
   ]
 }
