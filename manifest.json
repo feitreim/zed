@@ -245,6 +245,12 @@
       "title": "agent: Subagent low context warnings",
       "file": "suggestions/PR-49902.md",
       "date": "2026-02-23T16:05:18Z"
+    },
+    {
+      "pr": 49910,
+      "title": "git_graph: Add button to open up the commit view",
+      "file": "suggestions/PR-49910.md",
+      "date": "2026-02-23T17:38:44Z"
     }
   ]
 }
