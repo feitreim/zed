@@ -239,6 +239,11 @@ pub struct EditorSettingsContent {
     ///
     /// Default: 100
     pub minimum_split_diff_width: Option<f32>,
+
+    /// Text concealment settings.
+    /// Allows replacing text patterns with shorter visual substitutes
+    /// (e.g., "lambda" → "λ", "!=" → "≠").
+    pub conceal: Option<ConcealContent>,
 }
 
 #[derive(
@@ -1053,4 +1058,44 @@ impl schemars::JsonSchema for CenteredPaddingSettings {
             "description": "Centered layout related setting (left/right)."
         })
     }
+}
+
+#[with_fallible_options]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, JsonSchema, MergeFrom)]
+pub struct ConcealContent {
+    /// Concealment rules grouped by language.
+    ///
+    /// Example:
+    /// ```json
+    /// {
+    ///   "conceal": {
+    ///     "rules": [
+    ///       {
+    ///         "language": "Python",
+    ///         "substitutions": [
+    ///           { "ugly": "lambda", "pretty": "λ" },
+    ///           { "ugly": "!=", "pretty": "≠" }
+    ///         ]
+    ///       }
+    ///     ]
+    ///   }
+    /// }
+    /// ```
+    pub rules: Option<Vec<ConcealLanguageRule>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct ConcealLanguageRule {
+    /// The language these rules apply to (e.g., "Python", "Rust").
+    pub language: String,
+    /// The text substitutions to apply.
+    pub substitutions: Vec<ConcealSubstitution>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct ConcealSubstitution {
+    /// The text pattern to match and hide.
+    pub ugly: String,
+    /// The replacement text to display instead.
+    pub pretty: String,
 }

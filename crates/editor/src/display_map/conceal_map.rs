@@ -160,7 +160,7 @@ impl ConcealMap {
                 old: ConcealOffset(MultiBufferOffset(0))..old_len,
                 new: ConcealOffset(MultiBufferOffset(0))..new_len,
             }]
-        } else {
+        } else if self.concealments.is_empty() {
             self.snapshot.version += 1;
             fold_edits
                 .into_iter()
@@ -169,6 +169,14 @@ impl ConcealMap {
                     new: ConcealOffset(edit.new.start.0)..ConcealOffset(edit.new.end.0),
                 })
                 .collect()
+        } else {
+            self.snapshot.version += 1;
+            let old_len = ConcealOffset(old_output.len);
+            let new_len = ConcealOffset(new_output.len);
+            vec![ConcealEdit {
+                old: ConcealOffset(MultiBufferOffset(0))..old_len,
+                new: ConcealOffset(MultiBufferOffset(0))..new_len,
+            }]
         }
     }
 }

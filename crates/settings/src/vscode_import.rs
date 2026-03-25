@@ -310,6 +310,7 @@ impl VsCodeSettings {
             completion_detail_alignment: None,
             diff_view_style: None,
             minimum_split_diff_width: None,
+            conceal: None,
         }
     }
 

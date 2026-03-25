@@ -35820,11 +35820,11 @@ async fn test_conceal_reveal_lambda(cx: &mut TestAppContext) {
 fn test_cursor_movement_through_concealments(cx: &mut TestAppContext) {
     init_test(cx, |_| {});
 
-    //                  0123456789...
-    let buffer = cx.update(|cx| MultiBuffer::build_simple("a != b", cx));
+    // Multi-line buffer: concealments on line 0, cursor starts on line 1.
+    // Line-based reveal: moving cursor to line 0 reveals its concealments.
+    let buffer = cx.update(|cx| MultiBuffer::build_simple("a != b\nplain\n", cx));
     let editor = cx.add_window(|window, cx| build_editor(buffer.clone(), window, cx));
 
-    // Set up concealment: "!=" at offset 2..4 -> "≠"
     _ = editor.update(cx, |editor, window, cx| {
         let snapshot = editor.buffer.read(cx).snapshot(cx);
         let start = snapshot.anchor_after(multi_buffer::MultiBufferOffset(2));
@@ -35835,57 +35835,21 @@ fn test_cursor_movement_through_concealments(cx: &mut TestAppContext) {
             map.set_concealments(concealments, cx);
         });
 
-        // Display text should be "a ≠ b" (when cursor is not on the concealment)
-        assert_eq!(editor.display_text(cx), "a ≠ b");
-
-        // Place cursor at "b" (buffer offset 5)
+        // Cursor on line 1 — concealment on line 0 is active.
         editor.change_selections(SelectionEffects::default(), window, cx, |s| {
-            s.select_ranges([Point::new(0, 5)..Point::new(0, 5)]);
+            s.select_ranges([Point::new(1, 0)..Point::new(1, 0)]);
         });
+        assert_eq!(editor.display_text(cx), "a ≠ b\nplain\n");
 
-        // Move left to the space before "b" (buffer offset 4)
-        editor.move_left(&MoveLeft, window, cx);
-        let cursor = editor
-            .selections
-            .newest::<Point>(&editor.display_snapshot(cx))
-            .head();
-        assert_eq!(cursor, Point::new(0, 4), "should be at space after !=");
-
-        // Move left repeatedly, recording buffer positions.
-        let mut positions = vec![cursor];
-        for _ in 0..6 {
-            editor.move_left(&MoveLeft, window, cx);
-            let cursor = editor
-                .selections
-                .newest::<Point>(&editor.display_snapshot(cx))
-                .head();
-            positions.push(cursor);
-        }
-
-        // Starting from col 4 (space after "!="), moving left should traverse:
-        // 4 -> 3 (enter concealment from right, lands at "=" in "!=")
-        //   -> 2 ("!" in revealed "!=") -> 1 -> 0
-        assert_eq!(
-            positions,
-            vec![
-                Point::new(0, 4), // space after !=
-                Point::new(0, 3), // entered concealment from right, at "=" in !=
-                Point::new(0, 2), // "!" in revealed !=
-                Point::new(0, 1), // space after "a"
-                Point::new(0, 0), // "a"
-                Point::new(0, 0), // stuck at start
-                Point::new(0, 0),
-            ],
-            "cursor positions during left movement through concealment",
-        );
-
-        // Now move right from column 0 through the concealment
+        // Move cursor to line 0 — line-based reveal shows original text.
         editor.change_selections(SelectionEffects::default(), window, cx, |s| {
             s.select_ranges([Point::new(0, 0)..Point::new(0, 0)]);
         });
+        assert_eq!(editor.display_text(cx), "a != b\nplain\n");
 
+        // Cursor movement on the revealed line is normal.
         let mut positions = vec![];
-        for _ in 0..6 {
+        for _ in 0..7 {
             let cursor = editor
                 .selections
                 .newest::<Point>(&editor.display_snapshot(cx))
@@ -35893,19 +35857,24 @@ fn test_cursor_movement_through_concealments(cx: &mut TestAppContext) {
             positions.push(cursor);
             editor.move_right(&MoveRight, window, cx);
         }
-
-        // From col 0, moving right through "a != b":
-        // 0 -> 1 -> 3 (enters concealment, lands at "=") -> 4 (space) -> 5 ("b") -> 5
         assert_eq!(
-            positions[..5],
-            [
+            positions,
+            vec![
                 Point::new(0, 0),
                 Point::new(0, 1),
-                Point::new(0, 3), // entered concealment from left
-                Point::new(0, 4), // space after "!="
-                Point::new(0, 5), // "b"
+                Point::new(0, 2),
+                Point::new(0, 3),
+                Point::new(0, 4),
+                Point::new(0, 5),
+                Point::new(0, 6),
             ],
-            "cursor positions during right movement through concealment",
+            "cursor moves normally through revealed line",
         );
+
+        // Move cursor back to line 1 — concealment re-activates.
+        editor.change_selections(SelectionEffects::default(), window, cx, |s| {
+            s.select_ranges([Point::new(1, 0)..Point::new(1, 0)]);
+        });
+        assert_eq!(editor.display_text(cx), "a ≠ b\nplain\n");
     });
 }

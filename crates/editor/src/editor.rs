@@ -3785,6 +3785,26 @@ impl Editor {
             }
         }
 
+        if local && self.concealed {
+            let mut revealed_rows = HashSet::default();
+            for selection in self.selections.all::<Point>(&display_map) {
+                revealed_rows.insert(selection.head().row);
+            }
+            let mut revealed_ranges = Vec::new();
+            for row in revealed_rows {
+                let line_start = buffer.anchor_before(Point::new(row, 0));
+                let line_end = if row < buffer.max_point().row {
+                    buffer.anchor_after(Point::new(row + 1, 0))
+                } else {
+                    buffer.anchor_after(buffer.len())
+                };
+                revealed_ranges.push(line_start..line_end);
+            }
+            self.display_map.update(cx, |map, _cx| {
+                map.update_revealed_ranges(revealed_ranges, _cx);
+            });
+        }
+
         self.blink_manager.update(cx, BlinkManager::pause_blinking);
 
         if local && !self.suppress_selection_callback {
@@ -21765,46 +21785,50 @@ impl Editor {
 
     pub fn toggle_conceal(&mut self, _: &ToggleConceal, _: &mut Window, cx: &mut Context<Self>) {
         self.concealed = !self.concealed;
+        self.refresh_concealments(cx);
+    }
 
-        if self.concealed {
-            let snapshot = self.buffer.read(cx).snapshot(cx);
-            let text = snapshot.text();
-            let replacements: &[(&str, &str)] = &[
-                ("!=", "≠"),
-                ("==", "≡"),
-                ("=>", "⇒"),
-                ("->", "→"),
-                ("&&", "∧"),
-                ("||", "∨"),
-                ("lambda", "λ"),
-                ("fn", "ƒ"),
-            ];
+    fn refresh_concealments(&mut self, cx: &mut Context<Self>) {
+        if !self.concealed {
+            self.display_map.update(cx, |map, cx| {
+                map.set_concealments(vec![], cx);
+            });
+            return;
+        }
 
-            let mut concealments = Vec::new();
-            for &(pattern, replacement) in replacements {
+        let rules = EditorSettings::get_global(cx).conceal.rules.clone();
+        let language_name = self
+            .language_at(MultiBufferOffset(0), cx)
+            .map(|l| l.name().to_string());
+
+        let snapshot = self.buffer.read(cx).snapshot(cx);
+        let text = snapshot.text();
+        let mut concealments = Vec::new();
+
+        for rule in &rules {
+            if !language_name.as_deref().is_some_and(|n| n == rule.language) {
+                continue;
+            }
+            for sub in &rule.substitutions {
                 let mut search_from = 0;
-                while let Some(pos) = text[search_from..].find(pattern) {
+                while let Some(pos) = text[search_from..].find(sub.ugly.as_str()) {
                     let start = search_from + pos;
-                    let end = start + pattern.len();
+                    let end = start + sub.ugly.len();
                     let start_anchor =
                         snapshot.anchor_after(multi_buffer::MultiBufferOffset(start));
                     let end_anchor = snapshot.anchor_before(multi_buffer::MultiBufferOffset(end));
                     concealments.push((
                         start_anchor..end_anchor,
-                        gpui::SharedString::from(replacement),
+                        gpui::SharedString::from(sub.pretty.clone()),
                     ));
                     search_from = end;
                 }
             }
-
-            self.display_map.update(cx, |map, cx| {
-                map.set_concealments(concealments, cx);
-            });
-        } else {
-            self.display_map.update(cx, |map, cx| {
-                map.set_concealments(vec![], cx);
-            });
         }
+
+        self.display_map.update(cx, |map, cx| {
+            map.set_concealments(concealments, cx);
+        });
     }
 
     pub fn toggle_line_numbers(
@@ -24508,6 +24532,10 @@ impl Editor {
                             cx,
                         );
                     }
+                }
+
+                if self.concealed {
+                    self.refresh_concealments(cx);
                 }
 
                 cx.emit(EditorEvent::BufferEdited);
