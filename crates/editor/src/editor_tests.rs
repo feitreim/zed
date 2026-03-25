@@ -35792,7 +35792,6 @@ async fn test_conceal_reveal_lambda(cx: &mut TestAppContext) {
         let concealments = vec![(start..end, gpui::SharedString::from("λ"))];
 
         editor.concealed = true;
-        editor.concealments = concealments.clone();
         editor.display_map.update(cx, |map, cx| {
             map.set_concealments(concealments, cx);
         });
@@ -35832,7 +35831,6 @@ fn test_cursor_movement_through_concealments(cx: &mut TestAppContext) {
         let end = snapshot.anchor_before(multi_buffer::MultiBufferOffset(4));
         let concealments = vec![(start..end, gpui::SharedString::from("≠"))];
         editor.concealed = true;
-        editor.concealments = concealments.clone();
         editor.display_map.update(cx, |map, cx| {
             map.set_concealments(concealments, cx);
         });

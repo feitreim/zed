@@ -1186,7 +1186,6 @@ pub struct Editor {
     enable_runnables: bool,
     enable_mouse_wheel_zoom: bool,
     concealed: bool,
-    concealments: Vec<(Range<multi_buffer::Anchor>, gpui::SharedString)>,
     show_line_numbers: Option<bool>,
     use_relative_line_numbers: Option<bool>,
     show_git_diff_gutter: Option<bool>,
@@ -2422,7 +2421,6 @@ impl Editor {
             show_breadcrumbs: EditorSettings::get_global(cx).toolbar.breadcrumbs,
             show_gutter: full_mode,
             concealed: false,
-            concealments: Vec::new(),
             show_line_numbers: (!full_mode).then_some(false),
             use_relative_line_numbers: None,
             disable_expand_excerpt_buttons: !full_mode,
@@ -3690,26 +3688,6 @@ impl Editor {
                 )
             });
         }
-        if self.concealed && !self.concealments.is_empty() {
-            let buffer_snapshot = self.buffer.read(cx).snapshot(cx);
-            let mut revealed = Vec::new();
-
-            for selection in self.selections.disjoint_anchors().iter() {
-                let head = selection.head();
-                for (range, _) in &self.concealments {
-                    if head.cmp(&range.start, &buffer_snapshot).is_ge()
-                        && head.cmp(&range.end, &buffer_snapshot).is_lt()
-                    {
-                        revealed.push(range.clone());
-                    }
-                }
-            }
-
-            self.display_map.update(cx, |map, cx| {
-                map.update_revealed_ranges(revealed, cx);
-            });
-        }
-
         let display_map = self
             .display_map
             .update(cx, |display_map, cx| display_map.snapshot(cx));
@@ -21819,12 +21797,10 @@ impl Editor {
                 }
             }
 
-            self.concealments = concealments.clone();
             self.display_map.update(cx, |map, cx| {
                 map.set_concealments(concealments, cx);
             });
         } else {
-            self.concealments.clear();
             self.display_map.update(cx, |map, cx| {
                 map.set_concealments(vec![], cx);
             });

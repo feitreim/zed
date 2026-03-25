@@ -308,29 +308,11 @@ impl ConcealPoint {
     }
 
     pub fn to_fold_point(self, snapshot: &ConcealSnapshot) -> FoldPoint {
-        self.to_fold_point_biased(snapshot, Bias::Right)
-    }
-
-    pub fn to_fold_point_biased(self, snapshot: &ConcealSnapshot, bias: Bias) -> FoldPoint {
-        let (start, end, item) = snapshot
+        let (start, _, _) = snapshot
             .transforms
             .find::<Dimensions<ConcealPoint, FoldPoint>, _>((), &self, Bias::Right);
-        if item.is_some_and(|t| t.is_concealment()) && self == start.0 {
-            // Point is at the start of a concealment (after clip).
-            if bias == Bias::Left {
-                // Entering from the right: map to last byte of original text.
-                let end_offset = end.1.0;
-                FoldPoint(language::Point::new(
-                    end_offset.row,
-                    end_offset.column.saturating_sub(1),
-                ))
-            } else {
-                start.1
-            }
-        } else {
-            let overshoot = self.0 - start.0.0;
-            FoldPoint(start.1.0 + overshoot)
-        }
+        let overshoot = self.0 - start.0.0;
+        FoldPoint(start.1.0 + overshoot)
     }
 
     pub fn to_offset(self, snapshot: &ConcealSnapshot) -> ConcealOffset {

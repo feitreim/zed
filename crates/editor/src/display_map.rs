@@ -1814,7 +1814,7 @@ impl DisplaySnapshot {
             .tab_snapshot()
             .tab_point_to_conceal_point(tab_point, bias)
             .0;
-        let fold_point = conceal_point.to_fold_point_biased(self.conceal_snapshot(), bias);
+        let fold_point = conceal_point.to_fold_point(self.conceal_snapshot());
         fold_point.to_inlay_point(self.fold_snapshot())
     }
 
@@ -1827,7 +1827,7 @@ impl DisplaySnapshot {
             .tab_snapshot()
             .tab_point_to_conceal_point(tab_point, bias)
             .0;
-        conceal_point.to_fold_point_biased(self.conceal_snapshot(), bias)
+        conceal_point.to_fold_point(self.conceal_snapshot())
     }
 
     #[instrument(skip_all)]
