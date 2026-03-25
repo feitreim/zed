@@ -1185,6 +1185,8 @@ pub struct Editor {
     needs_initial_data_update: bool,
     enable_runnables: bool,
     enable_mouse_wheel_zoom: bool,
+    concealed: bool,
+    concealments: Vec<(Range<multi_buffer::Anchor>, gpui::SharedString)>,
     show_line_numbers: Option<bool>,
     use_relative_line_numbers: Option<bool>,
     show_git_diff_gutter: Option<bool>,
@@ -2419,6 +2421,8 @@ impl Editor {
             offset_content: !matches!(mode, EditorMode::SingleLine),
             show_breadcrumbs: EditorSettings::get_global(cx).toolbar.breadcrumbs,
             show_gutter: full_mode,
+            concealed: false,
+            concealments: Vec::new(),
             show_line_numbers: (!full_mode).then_some(false),
             use_relative_line_numbers: None,
             disable_expand_excerpt_buttons: !full_mode,
@@ -3686,6 +3690,26 @@ impl Editor {
                 )
             });
         }
+        if self.concealed && !self.concealments.is_empty() {
+            let buffer_snapshot = self.buffer.read(cx).snapshot(cx);
+            let mut revealed = Vec::new();
+
+            for selection in self.selections.disjoint_anchors().iter() {
+                let head = selection.head();
+                for (range, _) in &self.concealments {
+                    if head.cmp(&range.start, &buffer_snapshot).is_ge()
+                        && head.cmp(&range.end, &buffer_snapshot).is_lt()
+                    {
+                        revealed.push(range.clone());
+                    }
+                }
+            }
+
+            self.display_map.update(cx, |map, cx| {
+                map.update_revealed_ranges(revealed, cx);
+            });
+        }
+
         let display_map = self
             .display_map
             .update(cx, |display_map, cx| display_map.snapshot(cx));
@@ -21759,6 +21783,52 @@ impl Editor {
     pub fn has_indent_guides_disabled_for_buffer(&self, buffer_id: BufferId) -> bool {
         self.buffers_with_disabled_indent_guides
             .contains(&buffer_id)
+    }
+
+    pub fn toggle_conceal(&mut self, _: &ToggleConceal, _: &mut Window, cx: &mut Context<Self>) {
+        self.concealed = !self.concealed;
+
+        if self.concealed {
+            let snapshot = self.buffer.read(cx).snapshot(cx);
+            let text = snapshot.text();
+            let replacements: &[(&str, &str)] = &[
+                ("!=", "≠"),
+                ("==", "≡"),
+                ("=>", "⇒"),
+                ("->", "→"),
+                ("&&", "∧"),
+                ("||", "∨"),
+                ("lambda", "λ"),
+                ("fn", "ƒ"),
+            ];
+
+            let mut concealments = Vec::new();
+            for &(pattern, replacement) in replacements {
+                let mut search_from = 0;
+                while let Some(pos) = text[search_from..].find(pattern) {
+                    let start = search_from + pos;
+                    let end = start + pattern.len();
+                    let start_anchor =
+                        snapshot.anchor_after(multi_buffer::MultiBufferOffset(start));
+                    let end_anchor = snapshot.anchor_before(multi_buffer::MultiBufferOffset(end));
+                    concealments.push((
+                        start_anchor..end_anchor,
+                        gpui::SharedString::from(replacement),
+                    ));
+                    search_from = end;
+                }
+            }
+
+            self.concealments = concealments.clone();
+            self.display_map.update(cx, |map, cx| {
+                map.set_concealments(concealments, cx);
+            });
+        } else {
+            self.concealments.clear();
+            self.display_map.update(cx, |map, cx| {
+                map.set_concealments(vec![], cx);
+            });
+        }
     }
 
     pub fn toggle_line_numbers(

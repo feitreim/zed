@@ -802,6 +802,10 @@ impl FoldSnapshot {
         FoldPointCursor { cursor }
     }
 
+    pub fn text_summary(&self) -> MBTextSummary {
+        self.transforms.summary().output
+    }
+
     #[ztracing::instrument(skip_all)]
     pub fn len(&self) -> FoldOffset {
         FoldOffset(self.transforms.summary().output.len)
