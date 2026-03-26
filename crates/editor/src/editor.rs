@@ -3785,6 +3785,12 @@ impl Editor {
             }
         }
 
+        // Line-based cursor reveal: when concealments are active, reveal all
+        // concealments on the line(s) the cursor is on. This uses the deferred
+        // path (set_revealed_ranges_deferred) so we just mark dirty here — the
+        // next render's snapshot() call will rebuild the transform tree.
+        // No feedback loop risk: selections_did_change only fires from user input,
+        // not from display map rebuilds.
         if local && self.concealed {
             let mut revealed_rows = HashSet::default();
             for selection in self.selections.all::<Point>(&display_map) {
@@ -21788,6 +21794,12 @@ impl Editor {
         self.refresh_concealments(cx);
     }
 
+    /// Rescans the buffer for concealment pattern matches and updates the display map.
+    /// Called on toggle and on every buffer edit (when concealed).
+    ///
+    /// Reads conceal rules from EditorSettings, filters by the buffer's language,
+    /// then does a naive str::find scan for each pattern. Results are stored as
+    /// buffer Anchors which survive subsequent edits.
     fn refresh_concealments(&mut self, cx: &mut Context<Self>) {
         if !self.concealed {
             self.display_map.update(cx, |map, cx| {
@@ -21796,6 +21808,7 @@ impl Editor {
             return;
         }
 
+        // Clone rules early to release the borrow on cx before we need it mutably.
         let rules = EditorSettings::get_global(cx).conceal.rules.clone();
         let language_name = self
             .language_at(MultiBufferOffset(0), cx)
@@ -21814,6 +21827,8 @@ impl Editor {
                 while let Some(pos) = text[search_from..].find(sub.ugly.as_str()) {
                     let start = search_from + pos;
                     let end = start + sub.ugly.len();
+                    // anchor_after/before: the concealment range is exclusive of
+                    // adjacent text, so edits right at the boundary don't get pulled in.
                     let start_anchor =
                         snapshot.anchor_after(multi_buffer::MultiBufferOffset(start));
                     let end_anchor = snapshot.anchor_before(multi_buffer::MultiBufferOffset(end));
@@ -24534,6 +24549,8 @@ impl Editor {
                     }
                 }
 
+                // Re-scan for concealment patterns after every buffer edit so
+                // newly typed text (e.g. "lambda") gets concealed immediately.
                 if self.concealed {
                     self.refresh_concealments(cx);
                 }

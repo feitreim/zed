@@ -65,6 +65,9 @@ pub struct EditorSettings {
     pub conceal: Conceal,
 }
 
+/// Runtime representation of conceal settings. The Vec is empty when no rules
+/// are configured. Each rule groups substitutions by language name.
+/// Deserialized from the `conceal.rules` key in settings.json via ConcealContent.
 #[derive(Clone, Debug, Default)]
 pub struct Conceal {
     pub rules: Vec<settings::ConcealLanguageRule>,

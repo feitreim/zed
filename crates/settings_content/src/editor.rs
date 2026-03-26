@@ -1060,6 +1060,13 @@ impl schemars::JsonSchema for CenteredPaddingSettings {
     }
 }
 
+// --- Conceal settings ---
+// These types define the JSON schema for conceal configuration in settings.json.
+// Because EditorSettingsContent is #[serde(flatten)]'d into SettingsContent,
+// the "conceal" key appears at the top level of settings.json.
+//
+// The runtime counterpart lives in editor_settings.rs (Conceal struct).
+
 #[with_fallible_options]
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, JsonSchema, MergeFrom)]
 pub struct ConcealContent {
