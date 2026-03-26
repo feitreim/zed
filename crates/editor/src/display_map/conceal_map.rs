@@ -421,6 +421,10 @@ impl ConcealMap {
         (self.snapshot.clone(), edits)
     }
 
+    pub fn concealments(&self) -> &[(Range<Anchor>, SharedString)] {
+        &self.concealments
+    }
+
     /// Updates the revealed ranges. The dirty flag is picked up on the next
     /// sync() call (triggered by the render cycle taking a snapshot), which
     /// rebuilds the transform tree excluding concealments on revealed lines.

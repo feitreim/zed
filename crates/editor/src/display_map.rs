@@ -1294,9 +1294,11 @@ impl DisplayMap {
         ranges: Vec<Range<multi_buffer::Anchor>>,
         _cx: &mut Context<Self>,
     ) {
-        // Just update the conceal map's revealed ranges. The next snapshot()
-        // call will sync the full pipeline including the reveal changes.
         self.conceal_map.set_revealed_ranges(ranges);
+    }
+
+    pub fn concealments(&self) -> &[(Range<multi_buffer::Anchor>, gpui::SharedString)] {
+        self.conceal_map.concealments()
     }
 
     pub fn set_font(&self, font: Font, font_size: Pixels, cx: &mut Context<Self>) -> bool {

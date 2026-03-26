@@ -3785,27 +3785,29 @@ impl Editor {
             }
         }
 
-        // Line-based cursor reveal: when concealments are active, reveal all
-        // concealments on the line(s) the cursor is on. set_revealed_ranges marks
-        // dirty — the next render's snapshot() call will rebuild the transform tree.
-        // No feedback loop: selections_did_change only fires from user input,
-        // not from display map rebuilds.
+        // Cursor-level reveal: when concealments are active, reveal only
+        // the specific concealments that contain a cursor. This checks each
+        // cursor offset against the stored concealment ranges.
         if local && self.concealed {
-            let mut revealed_rows = HashSet::default();
-            for selection in self.selections.all::<Point>(&display_map) {
-                revealed_rows.insert(selection.head().row);
-            }
-            let mut revealed_ranges = Vec::new();
-            for row in revealed_rows {
-                let line_start = buffer.anchor_before(Point::new(row, 0));
-                let line_end = if row < buffer.max_point().row {
-                    buffer.anchor_after(Point::new(row + 1, 0))
-                } else {
-                    buffer.anchor_after(buffer.len())
-                };
-                revealed_ranges.push(line_start..line_end);
-            }
             self.display_map.update(cx, |map, _cx| {
+                let cursor_offsets: Vec<MultiBufferOffset> = self
+                    .selections
+                    .all::<MultiBufferOffset>(&display_map)
+                    .iter()
+                    .map(|s| s.head())
+                    .collect();
+
+                let revealed_ranges: Vec<Range<Anchor>> = map
+                    .concealments()
+                    .iter()
+                    .filter(|(range, _)| {
+                        let start = range.start.to_offset(buffer);
+                        let end = range.end.to_offset(buffer);
+                        cursor_offsets.iter().any(|&c| c >= start && c <= end)
+                    })
+                    .map(|(range, _)| range.clone())
+                    .collect();
+
                 map.update_revealed_ranges(revealed_ranges, _cx);
             });
         }
