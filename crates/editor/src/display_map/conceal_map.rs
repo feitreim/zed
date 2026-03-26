@@ -421,53 +421,12 @@ impl ConcealMap {
         (self.snapshot.clone(), edits)
     }
 
-    /// Sets revealed ranges without rebuilding transforms. The dirty flag is
-    /// picked up on the next sync() call during rendering. This is the safe path
-    /// used by selections_did_change — it avoids doing a full pipeline sync
-    /// inside an event handler, which previously caused infinite re-render loops.
-    pub fn set_revealed_ranges_deferred(&mut self, revealed_ranges: Vec<Range<Anchor>>) {
+    /// Updates the revealed ranges. The dirty flag is picked up on the next
+    /// sync() call (triggered by the render cycle taking a snapshot), which
+    /// rebuilds the transform tree excluding concealments on revealed lines.
+    pub fn set_revealed_ranges(&mut self, revealed_ranges: Vec<Range<Anchor>>) {
         self.revealed_ranges = revealed_ranges;
         self.revealed_dirty = true;
-    }
-
-    /// Immediately rebuilds transforms with the new revealed ranges.
-    /// Used by tests; the editor uses set_revealed_ranges_deferred instead.
-    pub fn set_revealed_ranges(
-        &mut self,
-        revealed_ranges: Vec<Range<Anchor>>,
-    ) -> (ConcealSnapshot, Vec<ConcealEdit>) {
-        if self.concealments.is_empty() {
-            self.revealed_ranges = revealed_ranges;
-            return (self.snapshot.clone(), vec![]);
-        }
-
-        let old_snapshot = self.snapshot.clone();
-        self.revealed_ranges = revealed_ranges;
-        self.snapshot.version += 1;
-
-        let mut new_transforms = SumTree::default();
-        build_transforms(
-            &mut new_transforms,
-            &self.snapshot.fold_snapshot,
-            &self.concealments,
-            &self.revealed_ranges,
-        );
-
-        let old_len = ConcealOffset(old_snapshot.transforms.summary().output.len);
-        self.snapshot.transforms = new_transforms;
-        let new_len = self.snapshot.len();
-
-        let edits = if old_len == new_len
-            && old_snapshot.transforms.summary().output == self.snapshot.transforms.summary().output
-        {
-            vec![]
-        } else {
-            vec![ConcealEdit {
-                old: ConcealOffset(MultiBufferOffset(0))..old_len,
-                new: ConcealOffset(MultiBufferOffset(0))..new_len,
-            }]
-        };
-        (self.snapshot.clone(), edits)
     }
 
     /// Reconciles the conceal layer with upstream fold changes.
@@ -1090,15 +1049,13 @@ mod tests {
     #[gpui::test]
     fn test_conceal_then_reveal(cx: &mut gpui::App) {
         init_test(cx);
-        // "lambda" at start of line 2 — conceal then reveal (simulating cursor entering)
         let text = "x = 2\nlambda x: x + 1\n";
         let buffer = MultiBuffer::build_simple(text, cx);
         let buffer_snapshot = buffer.read(cx).snapshot(cx);
         let (_, inlay_snapshot) = InlayMap::new(buffer_snapshot.clone());
         let (_, fold_snapshot) = super::super::fold_map::FoldMap::new(inlay_snapshot);
-        let (mut conceal_map, _) = ConcealMap::new(fold_snapshot);
+        let (mut conceal_map, _) = ConcealMap::new(fold_snapshot.clone());
 
-        // Conceal "lambda" (offset 6..12) → "λ"
         let concealments = vec![(
             buffer_snapshot.anchor_after(O(6))..buffer_snapshot.anchor_before(O(12)),
             SharedString::from("λ"),
@@ -1106,14 +1063,17 @@ mod tests {
         let (snapshot, _) = conceal_map.set_concealments(concealments);
         assert_eq!(snapshot.text(), "x = 2\nλ x: x + 1\n");
 
-        // Now reveal the line (simulating cursor on the lambda line)
+        // Reveal via the deferred path (same as the real editor code path).
+        // set_revealed_ranges marks dirty, then read() triggers sync().
         let revealed =
             vec![buffer_snapshot.anchor_before(O(6))..buffer_snapshot.anchor_after(O(12))];
-        let (snapshot, _) = conceal_map.set_revealed_ranges(revealed);
+        conceal_map.set_revealed_ranges(revealed);
+        let (snapshot, _) = conceal_map.read(fold_snapshot.clone(), vec![]);
         assert_eq!(snapshot.text(), "x = 2\nlambda x: x + 1\n");
 
         // Re-conceal (cursor moved away)
-        let (snapshot, _) = conceal_map.set_revealed_ranges(vec![]);
+        conceal_map.set_revealed_ranges(vec![]);
+        let (snapshot, _) = conceal_map.read(fold_snapshot, vec![]);
         assert_eq!(snapshot.text(), "x = 2\nλ x: x + 1\n");
     }
 

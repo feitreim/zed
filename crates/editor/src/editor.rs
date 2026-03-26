@@ -3786,10 +3786,9 @@ impl Editor {
         }
 
         // Line-based cursor reveal: when concealments are active, reveal all
-        // concealments on the line(s) the cursor is on. This uses the deferred
-        // path (set_revealed_ranges_deferred) so we just mark dirty here — the
-        // next render's snapshot() call will rebuild the transform tree.
-        // No feedback loop risk: selections_did_change only fires from user input,
+        // concealments on the line(s) the cursor is on. set_revealed_ranges marks
+        // dirty — the next render's snapshot() call will rebuild the transform tree.
+        // No feedback loop: selections_did_change only fires from user input,
         // not from display map rebuilds.
         if local && self.concealed {
             let mut revealed_rows = HashSet::default();

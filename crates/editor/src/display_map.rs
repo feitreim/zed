@@ -1296,7 +1296,7 @@ impl DisplayMap {
     ) {
         // Just update the conceal map's revealed ranges. The next snapshot()
         // call will sync the full pipeline including the reveal changes.
-        self.conceal_map.set_revealed_ranges_deferred(ranges);
+        self.conceal_map.set_revealed_ranges(ranges);
     }
 
     pub fn set_font(&self, font: Font, font_size: Pixels, cx: &mut Context<Self>) -> bool {
