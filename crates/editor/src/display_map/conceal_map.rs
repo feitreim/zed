@@ -472,13 +472,15 @@ impl ConcealMap {
         let new_output = new_transforms.summary().output;
         self.snapshot.transforms = new_transforms;
 
+        // Always bump version when something upstream changed — downstream
+        // layers (tab_map) check conceal_snapshot.version to decide whether
+        // to propagate updates. Not bumping would cause them to skip refreshes.
+        self.snapshot.version += 1;
+
         if fold_edits.is_empty() {
-            // Reveal change only — only bump version if output actually changed,
-            // preventing infinite re-render loops.
             if old_output == new_output {
                 return vec![];
             }
-            self.snapshot.version += 1;
             let old_len = ConcealOffset(old_output.len);
             let new_len = ConcealOffset(new_output.len);
             vec![ConcealEdit {
@@ -488,7 +490,6 @@ impl ConcealMap {
         } else if self.concealments.is_empty() {
             // No concealments — pure passthrough. FoldOffset == ConcealOffset,
             // so we can forward fold edits directly as conceal edits.
-            self.snapshot.version += 1;
             fold_edits
                 .into_iter()
                 .map(|edit| ConcealEdit {
@@ -500,7 +501,6 @@ impl ConcealMap {
             // Concealments active + buffer edited. We can't translate fold edits
             // to conceal edits without walking both old and new transform trees,
             // so we conservatively emit a single full-document edit.
-            self.snapshot.version += 1;
             let old_len = ConcealOffset(old_output.len);
             let new_len = ConcealOffset(new_output.len);
             vec![ConcealEdit {
