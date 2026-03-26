@@ -21794,12 +21794,9 @@ impl Editor {
         self.refresh_concealments(cx);
     }
 
-    /// Rescans the buffer for concealment pattern matches and updates the display map.
-    /// Called on toggle and on every buffer edit (when concealed).
-    ///
-    /// Reads conceal rules from EditorSettings, filters by the buffer's language,
-    /// then does a naive str::find scan for each pattern. Results are stored as
-    /// buffer Anchors which survive subsequent edits.
+    /// Collects concealment ranges from two sources and updates the display map:
+    /// 1. Tree-sitter `concealments.scm` queries (syntax-aware, per-language)
+    /// 2. Settings-based `conceal.rules` (user-defined string matching fallback)
     fn refresh_concealments(&mut self, cx: &mut Context<Self>) {
         if !self.concealed {
             self.display_map.update(cx, |map, cx| {
@@ -21808,16 +21805,26 @@ impl Editor {
             return;
         }
 
-        // Clone rules early to release the borrow on cx before we need it mutably.
         let rules = EditorSettings::get_global(cx).conceal.rules.clone();
         let language_name = self
             .language_at(MultiBufferOffset(0), cx)
             .map(|l| l.name().to_string());
 
         let snapshot = self.buffer.read(cx).snapshot(cx);
-        let text = snapshot.text();
         let mut concealments = Vec::new();
 
+        // Source 1: tree-sitter queries (syntax-aware)
+        let buffer_len = snapshot.len();
+        for (range, replacement) in
+            snapshot.concealed_ranges(MultiBufferOffset(0)..buffer_len)
+        {
+            let start_anchor = snapshot.anchor_after(range.start);
+            let end_anchor = snapshot.anchor_before(range.end);
+            concealments.push((start_anchor..end_anchor, replacement));
+        }
+
+        // Source 2: settings-based string matching fallback
+        let text = snapshot.text();
         for rule in &rules {
             if !language_name.as_deref().is_some_and(|n| n == rule.language) {
                 continue;
@@ -21827,8 +21834,6 @@ impl Editor {
                 while let Some(pos) = text[search_from..].find(sub.ugly.as_str()) {
                     let start = search_from + pos;
                     let end = start + sub.ugly.len();
-                    // anchor_after/before: the concealment range is exclusive of
-                    // adjacent text, so edits right at the boundary don't get pulled in.
                     let start_anchor =
                         snapshot.anchor_after(multi_buffer::MultiBufferOffset(start));
                     let end_anchor = snapshot.anchor_before(multi_buffer::MultiBufferOffset(end));
@@ -24640,6 +24645,9 @@ impl Editor {
                 self.refresh_runnables(Some(*buffer_id), window, cx);
                 self.refresh_selected_text_highlights(&self.display_snapshot(cx), true, window, cx);
                 self.colorize_brackets(true, cx);
+                if self.concealed {
+                    self.refresh_concealments(cx);
+                }
                 jsx_tag_auto_close::refresh_enabled_in_any_buffer(self, multibuffer, cx);
 
                 cx.emit(EditorEvent::Reparsed(*buffer_id));

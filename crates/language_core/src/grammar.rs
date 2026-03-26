@@ -34,6 +34,7 @@ pub struct Grammar {
     pub highlights_config: Option<HighlightsConfig>,
     pub brackets_config: Option<BracketsConfig>,
     pub redactions_config: Option<RedactionConfig>,
+    pub conceal_config: Option<ConcealConfig>,
     pub runnable_config: Option<RunnableConfig>,
     pub indents_config: Option<IndentConfig>,
     pub outline_config: Option<OutlineConfig>,
@@ -133,6 +134,13 @@ pub struct InjectionConfig {
 pub struct RedactionConfig {
     pub query: Query,
     pub redaction_capture_ix: u32,
+}
+
+pub struct ConcealConfig {
+    pub query: Query,
+    pub conceal_capture_ix: u32,
+    /// Per-pattern replacement strings from `#set! conceal.replacement`.
+    pub replacements: Vec<Option<SharedString>>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -258,6 +266,7 @@ impl Grammar {
             injection_config: None,
             override_config: None,
             redactions_config: None,
+            conceal_config: None,
             runnable_config: None,
             error_query: Query::new(&ts_language, "(ERROR) @error").ok(),
             debug_variables_config: None,
@@ -335,6 +344,11 @@ impl Grammar {
             self = self
                 .with_redaction_query(query.as_ref(), name)
                 .context("Error loading redaction query")?;
+        }
+        if let Some(query) = queries.concealments {
+            self = self
+                .with_conceal_query(query.as_ref(), name)
+                .context("Error loading conceal query")?;
         }
         if let Some(query) = queries.runnables {
             self = self
@@ -748,6 +762,43 @@ impl Grammar {
             self.redactions_config = Some(RedactionConfig {
                 query,
                 redaction_capture_ix,
+            });
+        }
+        Ok(self)
+    }
+
+    pub fn with_conceal_query(
+        mut self,
+        source: &str,
+        language_name: &LanguageName,
+    ) -> Result<Self> {
+        let query = Query::new(&self.ts_language, source)?;
+        let mut conceal_capture_ix = 0;
+        if populate_capture_indices(
+            &query,
+            language_name,
+            "concealments",
+            &[],
+            &mut [Capture::Required("conceal", &mut conceal_capture_ix)],
+        ) {
+            let replacements = (0..query.pattern_count())
+                .map(|ix| {
+                    query.property_settings(ix).iter().find_map(|setting| {
+                        if setting.key.as_ref() == "conceal.replacement" {
+                            setting
+                                .value
+                                .as_ref()
+                                .map(|v| SharedString::from(v.to_string()))
+                        } else {
+                            None
+                        }
+                    })
+                })
+                .collect();
+            self.conceal_config = Some(ConcealConfig {
+                query,
+                conceal_capture_ix,
+                replacements,
             });
         }
         Ok(self)
