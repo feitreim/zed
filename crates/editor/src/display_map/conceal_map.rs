@@ -19,8 +19,7 @@ pub struct ConcealMap {
     snapshot: ConcealSnapshot,
     concealments: Vec<(Range<Anchor>, SharedString)>,
     revealed_ranges: Vec<Range<Anchor>>,
-    /// Dirty flag: set when revealed_ranges changes, cleared by the next sync().
-    revealed_dirty: bool,
+    prev_revealed_ranges: Vec<Range<Anchor>>,
 }
 
 #[derive(Clone)]
@@ -345,7 +344,7 @@ impl ConcealMap {
                 snapshot: snapshot.clone(),
                 concealments: Vec::new(),
                 revealed_ranges: Vec::new(),
-                revealed_dirty: false,
+                prev_revealed_ranges: Vec::new(),
             },
             snapshot,
         )
@@ -364,6 +363,7 @@ impl ConcealMap {
     /// `set_concealments` to avoid a redundant rebuild.
     pub fn sync_fold_snapshot(&mut self, fold_snapshot: FoldSnapshot) {
         self.snapshot.fold_snapshot = fold_snapshot;
+        self.prev_revealed_ranges = self.revealed_ranges.clone();
     }
 
     pub fn set_concealments(
@@ -405,16 +405,15 @@ impl ConcealMap {
     }
 
     pub fn set_revealed_ranges(&mut self, revealed_ranges: Vec<Range<Anchor>>) {
+        std::mem::swap(&mut self.prev_revealed_ranges, &mut self.revealed_ranges);
         self.revealed_ranges = revealed_ranges;
-        self.revealed_dirty = true;
     }
 
-    /// When concealments are active and fold edits arrive, we emit a full-doc
-    /// edit rather than forwarding fold edits as conceal edits, because fold-offsets
-    /// and conceal-offsets diverge (e.g. "lambda" is 6 bytes but "λ" is 2).
+    /// Reconciles the conceal layer with upstream fold changes. Both reveal
+    /// changes and fold edits are handled incrementally by splicing affected
+    /// regions in the existing transform tree.
     fn sync(&mut self, fold_snapshot: FoldSnapshot, fold_edits: Vec<FoldEdit>) -> Vec<ConcealEdit> {
-        let reveal_changed = self.revealed_dirty;
-        self.revealed_dirty = false;
+        let reveal_changed = self.revealed_ranges != self.prev_revealed_ranges;
 
         if fold_edits.is_empty()
             && self.snapshot.fold_snapshot.version == fold_snapshot.version
@@ -426,27 +425,107 @@ impl ConcealMap {
         self.snapshot.fold_snapshot = fold_snapshot;
         self.snapshot.version += 1;
 
-        // Reveal-only change (no fold edits): full rebuild since revealed ranges
-        // can affect any concealment in the tree.
+        // Reveal-only change: compute the affected fold-offset ranges from
+        // the symmetric difference of old and new revealed ranges, then splice
+        // just those regions instead of rebuilding the entire tree.
         if fold_edits.is_empty() {
-            let old_output = self.snapshot.transforms.summary().output;
-            let mut new_transforms = SumTree::default();
-            build_transforms(
-                &mut new_transforms,
-                &self.snapshot.fold_snapshot,
-                &self.concealments,
-                &self.revealed_ranges,
-            );
-            let new_output = new_transforms.summary().output;
-            self.snapshot.transforms = new_transforms;
-
-            if old_output == new_output {
+            let affected = self.reveal_affected_ranges();
+            if affected.is_empty() {
+                self.prev_revealed_ranges = self.revealed_ranges.clone();
                 return vec![];
             }
-            return vec![ConcealEdit {
-                old: ConcealOffset(MultiBufferOffset(0))..ConcealOffset(old_output.len),
-                new: ConcealOffset(MultiBufferOffset(0))..ConcealOffset(new_output.len),
-            }];
+
+            let resolved = self.resolve_concealments();
+            let mut conceal_edits = Patch::default();
+            let mut new_transforms = SumTree::default();
+            let mut cursor = self
+                .snapshot
+                .transforms
+                .cursor::<Dimensions<FoldOffset, ConcealOffset>>(());
+
+            for affected_range in &affected {
+                new_transforms.append(cursor.slice(&affected_range.start, Bias::Left), ());
+                if cursor.item().is_some_and(|t| !t.is_concealment())
+                    && cursor.end().0 == affected_range.start
+                {
+                    if let Some(Transform::Isomorphic(summary)) = cursor.item() {
+                        push_isomorphic(&mut new_transforms, *summary);
+                    }
+                    cursor.next();
+                }
+
+                let old_start =
+                    cursor.start().1 + (affected_range.start.0 - cursor.start().0.0);
+                cursor.seek(&affected_range.end, Bias::Right);
+                let old_end =
+                    cursor.start().1 + (affected_range.end.0 - cursor.start().0.0);
+
+                let prefix_start = FoldOffset(new_transforms.summary().input.len);
+                if affected_range.start > prefix_start {
+                    push_isomorphic(
+                        &mut new_transforms,
+                        self.snapshot.fold_snapshot.text_summary_for_range(
+                            prefix_start.to_point(&self.snapshot.fold_snapshot)
+                                ..affected_range.start.to_point(&self.snapshot.fold_snapshot),
+                        ),
+                    );
+                }
+                let new_start = ConcealOffset(new_transforms.summary().output.len);
+
+                self.build_region(
+                    &mut new_transforms,
+                    &resolved,
+                    affected_range.start,
+                    affected_range.end,
+                );
+
+                let built = FoldOffset(new_transforms.summary().input.len);
+                if built < affected_range.end {
+                    push_isomorphic(
+                        &mut new_transforms,
+                        self.snapshot.fold_snapshot.text_summary_for_range(
+                            built.to_point(&self.snapshot.fold_snapshot)
+                                ..affected_range.end.to_point(&self.snapshot.fold_snapshot),
+                        ),
+                    );
+                }
+                let new_end = ConcealOffset(new_transforms.summary().output.len);
+
+                conceal_edits.push(text::Edit {
+                    old: old_start..old_end,
+                    new: new_start..new_end,
+                });
+
+                if cursor.item().is_some_and(|t| !t.is_concealment())
+                    && cursor.start().0 < cursor.end().0
+                {
+                    let remainder_start = FoldOffset(new_transforms.summary().input.len);
+                    let remainder_end = cursor.end().0;
+                    if remainder_end > remainder_start {
+                        push_isomorphic(
+                            &mut new_transforms,
+                            self.snapshot.fold_snapshot.text_summary_for_range(
+                                remainder_start.to_point(&self.snapshot.fold_snapshot)
+                                    ..remainder_end.to_point(&self.snapshot.fold_snapshot),
+                            ),
+                        );
+                    }
+                    cursor.next();
+                }
+            }
+
+            new_transforms.append(cursor.suffix(), ());
+            if new_transforms.is_empty() {
+                push_isomorphic(
+                    &mut new_transforms,
+                    self.snapshot.fold_snapshot.text_summary(),
+                );
+            }
+
+            drop(cursor);
+            self.snapshot.transforms = new_transforms;
+            self.prev_revealed_ranges = self.revealed_ranges.clone();
+            return conceal_edits.into_inner();
         }
 
         // Incremental sync: walk the old transform tree and splice in edits,
@@ -556,6 +635,7 @@ impl ConcealMap {
 
         drop(cursor);
         self.snapshot.transforms = new_transforms;
+        self.prev_revealed_ranges = self.revealed_ranges.clone();
         conceal_edits.into_inner()
     }
 
@@ -565,6 +645,54 @@ impl ConcealMap {
             &self.concealments,
             &self.revealed_ranges,
         )
+    }
+
+    /// Returns fold-offset ranges of concealments whose reveal state changed
+    /// between prev_revealed_ranges and revealed_ranges.
+    fn reveal_affected_ranges(&self) -> Vec<Range<FoldOffset>> {
+        if self.concealments.is_empty() {
+            return Vec::new();
+        }
+        let buffer = &self.snapshot.fold_snapshot.inlay_snapshot.buffer;
+        let fold_snapshot = &self.snapshot.fold_snapshot;
+
+        let mut affected = Vec::new();
+        for (range, _) in &self.concealments {
+            let was_revealed = self.prev_revealed_ranges.iter().any(|revealed| {
+                range.start.cmp(&revealed.end, buffer).is_lt()
+                    && range.end.cmp(&revealed.start, buffer).is_gt()
+            });
+            let is_revealed = self.revealed_ranges.iter().any(|revealed| {
+                range.start.cmp(&revealed.end, buffer).is_lt()
+                    && range.end.cmp(&revealed.start, buffer).is_gt()
+            });
+            if was_revealed == is_revealed {
+                continue;
+            }
+            let start_offset = range.start.to_offset(buffer);
+            let end_offset = range.end.to_offset(buffer);
+            let start_fold = fold_snapshot
+                .to_fold_point(
+                    fold_snapshot
+                        .inlay_snapshot
+                        .to_inlay_point(buffer.offset_to_point(start_offset)),
+                    Bias::Right,
+                )
+                .to_offset(fold_snapshot);
+            let end_fold = fold_snapshot
+                .to_fold_point(
+                    fold_snapshot
+                        .inlay_snapshot
+                        .to_inlay_point(buffer.offset_to_point(end_offset)),
+                    Bias::Left,
+                )
+                .to_offset(fold_snapshot);
+            if start_fold < end_fold {
+                affected.push(start_fold..end_fold);
+            }
+        }
+        affected.sort_by_key(|r| r.start);
+        affected
     }
 
     fn build_region(
