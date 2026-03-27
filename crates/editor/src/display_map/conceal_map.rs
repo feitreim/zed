@@ -12,6 +12,7 @@ use std::{
     cmp,
     ops::{Add, AddAssign, Deref, Range, Sub, SubAssign},
 };
+use text::Patch;
 use sum_tree::{Bias, Cursor, Dimensions, SumTree};
 
 /// Mutable state for the conceal layer. Holds the current snapshot plus the
@@ -37,8 +38,9 @@ pub struct ConcealMap {
 pub struct ConcealSnapshot {
     pub fold_snapshot: FoldSnapshot,
     transforms: SumTree<Transform>,
-    /// Monotonically increasing version. Downstream layers (TabMap, WrapMap)
-    /// compare this to detect when they need to re-sync.
+    /// When true, fold space == conceal space. All coordinate conversions
+    /// and chunk iteration skip the SumTree entirely.
+    passthrough: bool,
     pub version: usize,
 }
 
@@ -250,16 +252,18 @@ impl<'a> sum_tree::Dimension<'a, TransformSummary> for FoldOffset {
 /// - For isomorphic transforms: forwards chunks from the fold layer, slicing at
 ///   transform boundaries
 pub struct ConcealChunks<'a> {
+    passthrough: bool,
     transform_cursor: Cursor<'a, 'static, Transform, Dimensions<ConcealOffset, FoldOffset>>,
     fold_chunks: FoldChunks<'a>,
-    /// Cached current fold chunk and its starting offset, to avoid re-seeking
-    /// when a fold chunk spans multiple transform boundaries.
     fold_chunk: Option<(FoldOffset, Chunk<'a>)>,
     fold_offset: FoldOffset,
     output_offset: ConcealOffset,
     max_output_offset: ConcealOffset,
-    /// Byte offset into the current replacement string (for partial reads).
     replacement_offset: usize,
+    /// True after a concealment — the next isomorphic region needs to seek
+    /// fold_chunks to the right position. False during sequential access
+    /// where fold_chunks.next() suffices.
+    needs_seek: bool,
 }
 
 /// Iterates row metadata (soft wrap info, buffer row mapping) in conceal-space.
@@ -279,6 +283,9 @@ impl ConcealPoint {
     /// is a simple offset addition. For concealment regions the point maps to the
     /// start or end of the concealed fold range (depending on bias at call site).
     pub fn to_fold_point(self, snapshot: &ConcealSnapshot) -> FoldPoint {
+        if snapshot.passthrough {
+            return FoldPoint(self.0);
+        }
         let (start, _, _) = snapshot
             .transforms
             .find::<Dimensions<ConcealPoint, FoldPoint>, _>((), &self, Bias::Right);
@@ -286,9 +293,10 @@ impl ConcealPoint {
         FoldPoint(start.1.0 + overshoot)
     }
 
-    /// Converts a conceal point to a conceal offset by finding the transform node
-    /// containing this point and computing the byte offset within it.
     pub fn to_offset(self, snapshot: &ConcealSnapshot) -> ConcealOffset {
+        if snapshot.passthrough {
+            return ConcealOffset(FoldPoint(self.0).to_offset(&snapshot.fold_snapshot).0);
+        }
         let (start, _, item) = snapshot
             .transforms
             .find::<Dimensions<ConcealPoint, TransformSummary>, _>((), &self, Bias::Right);
@@ -314,6 +322,9 @@ impl ConcealPoint {
 
 impl ConcealOffset {
     pub fn to_point(self, snapshot: &ConcealSnapshot) -> ConcealPoint {
+        if snapshot.passthrough {
+            return ConcealPoint(FoldOffset(self.0).to_point(&snapshot.fold_snapshot).0);
+        }
         let (start, _, item) = snapshot
             .transforms
             .find::<Dimensions<ConcealOffset, TransformSummary>, _>((), &self, Bias::Right);
@@ -343,6 +354,7 @@ impl ConcealMap {
         let mut snapshot = ConcealSnapshot {
             transforms: SumTree::default(),
             fold_snapshot,
+            passthrough: true,
             version: 0,
         };
         build_transforms(&mut snapshot.transforms, &snapshot.fold_snapshot, &[], &[]);
@@ -378,6 +390,7 @@ impl ConcealMap {
         concealments: Vec<(Range<Anchor>, SharedString)>,
     ) -> (ConcealSnapshot, Vec<ConcealEdit>) {
         let old_snapshot = self.snapshot.clone();
+        self.snapshot.passthrough = concealments.is_empty();
         self.concealments = concealments;
         self.snapshot.version += 1;
 
@@ -434,7 +447,6 @@ impl ConcealMap {
         let reveal_changed = self.revealed_dirty;
         self.revealed_dirty = false;
 
-        // Fast path: nothing changed upstream and no pending reveal update.
         if fold_edits.is_empty()
             && self.snapshot.fold_snapshot.version == fold_snapshot.version
             && !reveal_changed
@@ -442,58 +454,234 @@ impl ConcealMap {
             return Vec::new();
         }
 
-        let old_snapshot = self.snapshot.clone();
         self.snapshot.fold_snapshot = fold_snapshot;
-
-        // Always rebuild the full transform tree. Concealments are stored as
-        // buffer Anchors, so they automatically track their positions through edits.
-        let mut new_transforms = SumTree::default();
-        build_transforms(
-            &mut new_transforms,
-            &self.snapshot.fold_snapshot,
-            &self.concealments,
-            &self.revealed_ranges,
-        );
-
-        let old_output = old_snapshot.transforms.summary().output;
-        let new_output = new_transforms.summary().output;
-        self.snapshot.transforms = new_transforms;
-
-        // Always bump version when something upstream changed — downstream
-        // layers (tab_map) check conceal_snapshot.version to decide whether
-        // to propagate updates. Not bumping would cause them to skip refreshes.
         self.snapshot.version += 1;
 
+        // Reveal-only change (no fold edits): full rebuild since revealed ranges
+        // can affect any concealment in the tree.
         if fold_edits.is_empty() {
+            let old_output = self.snapshot.transforms.summary().output;
+            let mut new_transforms = SumTree::default();
+            build_transforms(
+                &mut new_transforms,
+                &self.snapshot.fold_snapshot,
+                &self.concealments,
+                &self.revealed_ranges,
+            );
+            let new_output = new_transforms.summary().output;
+            self.snapshot.transforms = new_transforms;
+
             if old_output == new_output {
                 return vec![];
             }
-            let old_len = ConcealOffset(old_output.len);
-            let new_len = ConcealOffset(new_output.len);
-            vec![ConcealEdit {
-                old: ConcealOffset(MultiBufferOffset(0))..old_len,
-                new: ConcealOffset(MultiBufferOffset(0))..new_len,
-            }]
-        } else if self.concealments.is_empty() {
-            // No concealments — pure passthrough. FoldOffset == ConcealOffset,
-            // so we can forward fold edits directly as conceal edits.
-            fold_edits
-                .into_iter()
-                .map(|edit| ConcealEdit {
-                    old: ConcealOffset(edit.old.start.0)..ConcealOffset(edit.old.end.0),
-                    new: ConcealOffset(edit.new.start.0)..ConcealOffset(edit.new.end.0),
-                })
-                .collect()
-        } else {
-            // Concealments active + buffer edited. We can't translate fold edits
-            // to conceal edits without walking both old and new transform trees,
-            // so we conservatively emit a single full-document edit.
-            let old_len = ConcealOffset(old_output.len);
-            let new_len = ConcealOffset(new_output.len);
-            vec![ConcealEdit {
-                old: ConcealOffset(MultiBufferOffset(0))..old_len,
-                new: ConcealOffset(MultiBufferOffset(0))..new_len,
-            }]
+            return vec![ConcealEdit {
+                old: ConcealOffset(MultiBufferOffset(0))..ConcealOffset(old_output.len),
+                new: ConcealOffset(MultiBufferOffset(0))..ConcealOffset(new_output.len),
+            }];
+        }
+
+        // Incremental sync: walk the old transform tree and splice in edits,
+        // resolving concealments only in the edited regions. Follows the
+        // same pattern as InlayMap::sync.
+        let resolved = self.resolve_concealments();
+        let mut conceal_edits = Patch::default();
+        let mut new_transforms = SumTree::default();
+        let mut cursor = self
+            .snapshot
+            .transforms
+            .cursor::<Dimensions<FoldOffset, ConcealOffset>>(());
+        let mut fold_edits_iter = fold_edits.iter().peekable();
+
+        while let Some(fold_edit) = fold_edits_iter.next() {
+            new_transforms.append(cursor.slice(&fold_edit.old.start, Bias::Left), ());
+            if cursor.item().is_some_and(|t| !t.is_concealment())
+                && cursor.end().0 == fold_edit.old.start
+            {
+                if let Some(Transform::Isomorphic(summary)) = cursor.item() {
+                    push_isomorphic(&mut new_transforms, *summary);
+                }
+                cursor.next();
+            }
+
+            // Map old edit bounds to conceal-offset space.
+            let old_start = cursor.start().1 + (fold_edit.old.start.0 - cursor.start().0 .0);
+            cursor.seek(&fold_edit.old.end, Bias::Right);
+            let old_end = cursor.start().1 + (fold_edit.old.end.0 - cursor.start().0 .0);
+
+            // Build the new content for the edited region: isomorphic text
+            // interspersed with any concealments that fall in range.
+            let prefix_start = FoldOffset(new_transforms.summary().input.len);
+            let prefix_end = fold_edit.new.start;
+            if prefix_end > prefix_start {
+                push_isomorphic(
+                    &mut new_transforms,
+                    self.snapshot.fold_snapshot.text_summary_for_range(
+                        prefix_start.to_point(&self.snapshot.fold_snapshot)
+                            ..prefix_end.to_point(&self.snapshot.fold_snapshot),
+                    ),
+                );
+            }
+            let new_start = ConcealOffset(new_transforms.summary().output.len);
+
+            // Insert concealments within the edited range.
+            self.build_region(
+                &mut new_transforms,
+                &resolved,
+                fold_edit.new.start,
+                fold_edit.new.end,
+            );
+
+            // Fill any remaining gap to the edit end.
+            let built = FoldOffset(new_transforms.summary().input.len);
+            if built < fold_edit.new.end {
+                push_isomorphic(
+                    &mut new_transforms,
+                    self.snapshot.fold_snapshot.text_summary_for_range(
+                        built.to_point(&self.snapshot.fold_snapshot)
+                            ..fold_edit.new.end.to_point(&self.snapshot.fold_snapshot),
+                    ),
+                );
+            }
+            let new_end = ConcealOffset(new_transforms.summary().output.len);
+
+            conceal_edits.push(text::Edit {
+                old: old_start..old_end,
+                new: new_start..new_end,
+            });
+
+            // If the next edit doesn't intersect the current transform,
+            // push its remainder.
+            if fold_edits_iter
+                .peek()
+                .is_none_or(|edit| edit.old.start >= cursor.end().0)
+            {
+                let remainder_start = FoldOffset(new_transforms.summary().input.len);
+                let remainder_end = FoldOffset(
+                    fold_edit.new.end.0 + (cursor.end().0 .0 - fold_edit.old.end.0),
+                );
+                if remainder_end > remainder_start {
+                    self.build_region(
+                        &mut new_transforms,
+                        &resolved,
+                        remainder_start,
+                        remainder_end,
+                    );
+                    let built = FoldOffset(new_transforms.summary().input.len);
+                    if built < remainder_end {
+                        push_isomorphic(
+                            &mut new_transforms,
+                            self.snapshot.fold_snapshot.text_summary_for_range(
+                                built.to_point(&self.snapshot.fold_snapshot)
+                                    ..remainder_end.to_point(&self.snapshot.fold_snapshot),
+                            ),
+                        );
+                    }
+                }
+                cursor.next();
+            }
+        }
+
+        new_transforms.append(cursor.suffix(), ());
+        if new_transforms.is_empty() {
+            push_isomorphic(
+                &mut new_transforms,
+                self.snapshot.fold_snapshot.text_summary(),
+            );
+        }
+
+        drop(cursor);
+        self.snapshot.transforms = new_transforms;
+        conceal_edits.into_inner()
+    }
+
+    /// Resolves all concealments to fold offsets, filtering revealed ranges.
+    fn resolve_concealments(&self) -> Vec<(Range<FoldOffset>, SharedString)> {
+        let buffer = &self.snapshot.fold_snapshot.inlay_snapshot.buffer;
+        let fold_snapshot = &self.snapshot.fold_snapshot;
+
+        let mut resolved: Vec<(Range<FoldOffset>, SharedString)> = self
+            .concealments
+            .iter()
+            .filter_map(|(range, replacement)| {
+                if self.revealed_ranges.iter().any(|revealed| {
+                    range.start.cmp(&revealed.end, buffer).is_lt()
+                        && range.end.cmp(&revealed.start, buffer).is_gt()
+                }) {
+                    return None;
+                }
+
+                let start_buffer_offset = range.start.to_offset(buffer);
+                let end_buffer_offset = range.end.to_offset(buffer);
+                let start_inlay_point = fold_snapshot
+                    .inlay_snapshot
+                    .to_inlay_point(buffer.offset_to_point(start_buffer_offset));
+                let end_inlay_point = fold_snapshot
+                    .inlay_snapshot
+                    .to_inlay_point(buffer.offset_to_point(end_buffer_offset));
+                let start_fold = fold_snapshot
+                    .to_fold_point(start_inlay_point, Bias::Right)
+                    .to_offset(fold_snapshot);
+                let end_fold = fold_snapshot
+                    .to_fold_point(end_inlay_point, Bias::Left)
+                    .to_offset(fold_snapshot);
+
+                if start_fold >= end_fold {
+                    return None;
+                }
+                Some((start_fold..end_fold, replacement.clone()))
+            })
+            .collect();
+
+        resolved.sort_by_key(|(range, _)| range.start);
+        let mut last_end = FoldOffset(MultiBufferOffset(0));
+        resolved.retain(|(range, _)| {
+            if range.start < last_end {
+                return false;
+            }
+            last_end = range.end;
+            true
+        });
+        resolved
+    }
+
+    /// Builds transforms for a fold-offset region, inserting concealments that
+    /// fall within [start..end).
+    fn build_region(
+        &self,
+        transforms: &mut SumTree<Transform>,
+        resolved: &[(Range<FoldOffset>, SharedString)],
+        start: FoldOffset,
+        end: FoldOffset,
+    ) {
+        let fold_snapshot = &self.snapshot.fold_snapshot;
+        for (range, replacement) in resolved {
+            if range.end <= start || range.start >= end {
+                continue;
+            }
+            let clamped_start = range.start.max(start);
+            let clamped_end = range.end.min(end);
+
+            // Isomorphic gap before this concealment.
+            let built = FoldOffset(transforms.summary().input.len);
+            if clamped_start > built {
+                push_isomorphic(
+                    transforms,
+                    fold_snapshot.text_summary_for_range(
+                        built.to_point(fold_snapshot)..clamped_start.to_point(fold_snapshot),
+                    ),
+                );
+            }
+
+            let input_summary = fold_snapshot.text_summary_for_range(
+                clamped_start.to_point(fold_snapshot)..clamped_end.to_point(fold_snapshot),
+            );
+            transforms.push(
+                Transform::Replacement {
+                    input: input_summary,
+                    text: replacement.clone(),
+                },
+                (),
+            );
         }
     }
 }
@@ -505,6 +693,9 @@ impl ConcealSnapshot {
     /// concealment, it snaps to the start or end depending on bias (Left snaps
     /// to start, Right snaps to end — this controls cursor behavior at boundaries).
     pub fn to_conceal_point(&self, point: FoldPoint, bias: Bias) -> ConcealPoint {
+        if self.passthrough {
+            return ConcealPoint(point.0);
+        }
         let (start, end, item) = self
             .transforms
             .find::<Dimensions<FoldPoint, ConcealPoint>, _>((), &point, Bias::Right);
@@ -521,10 +712,16 @@ impl ConcealSnapshot {
     }
 
     pub fn len(&self) -> ConcealOffset {
+        if self.passthrough {
+            return ConcealOffset(self.fold_snapshot.len().0);
+        }
         ConcealOffset(self.transforms.summary().output.len)
     }
 
     pub fn max_point(&self) -> ConcealPoint {
+        if self.passthrough {
+            return ConcealPoint(self.fold_snapshot.max_point().0);
+        }
         ConcealPoint(self.transforms.summary().output.lines)
     }
 
@@ -541,6 +738,9 @@ impl ConcealSnapshot {
     /// Clamps a conceal point to a valid position. Points inside a concealment
     /// snap to its boundary; points in isomorphic regions delegate to fold's clip_point.
     pub fn clip_point(&self, point: ConcealPoint, bias: Bias) -> ConcealPoint {
+        if self.passthrough {
+            return ConcealPoint(self.fold_snapshot.clip_point(FoldPoint(point.0), bias).0);
+        }
         let (start, end, item) = self
             .transforms
             .find::<Dimensions<ConcealPoint, FoldPoint>, _>((), &point, Bias::Right);
@@ -569,7 +769,10 @@ impl ConcealSnapshot {
         let cursor = self
             .transforms
             .cursor::<Dimensions<FoldPoint, ConcealPoint>>(());
-        ConcealPointCursor { cursor }
+        ConcealPointCursor {
+            passthrough: self.passthrough,
+            cursor,
+        }
     }
 
     pub fn row_infos(&self, start_row: u32) -> ConcealRows<'_> {
@@ -614,6 +817,28 @@ impl ConcealSnapshot {
         language_aware: LanguageAwareStyling,
         highlights: Highlights<'a>,
     ) -> ConcealChunks<'a> {
+        if self.passthrough {
+            let fold_start = FoldOffset(range.start.0);
+            let fold_end = FoldOffset(range.end.0);
+            return ConcealChunks {
+                passthrough: true,
+                transform_cursor: self
+                    .transforms
+                    .cursor::<Dimensions<ConcealOffset, FoldOffset>>(()),
+                fold_chunks: self.fold_snapshot.chunks(
+                    fold_start..fold_end,
+                    language_aware,
+                    highlights,
+                ),
+                fold_chunk: None,
+                fold_offset: fold_start,
+                output_offset: range.start,
+                max_output_offset: range.end,
+                replacement_offset: 0,
+                needs_seek: false,
+            };
+        }
+
         let mut transform_cursor = self
             .transforms
             .cursor::<Dimensions<ConcealOffset, FoldOffset>>(());
@@ -639,6 +864,7 @@ impl ConcealSnapshot {
         };
 
         ConcealChunks {
+            passthrough: false,
             transform_cursor,
             fold_chunks: self.fold_snapshot.chunks(
                 fold_start..fold_end,
@@ -650,6 +876,7 @@ impl ConcealSnapshot {
             output_offset: range.start,
             max_output_offset: range.end,
             replacement_offset: 0,
+            needs_seek: false,
         }
     }
 
@@ -686,13 +913,15 @@ impl ConcealSnapshot {
 /// Unlike to_conceal_point() which does a fresh tree search each call, this cursor
 /// remembers its position and uses seek_forward for O(log n) amortized traversal.
 pub struct ConcealPointCursor<'transforms> {
+    passthrough: bool,
     cursor: Cursor<'transforms, 'static, Transform, Dimensions<FoldPoint, ConcealPoint>>,
 }
 
 impl ConcealPointCursor<'_> {
-    /// Maps a FoldPoint to ConcealPoint, advancing the cursor forward. Points must
-    /// be supplied in non-decreasing order for correctness.
     pub fn map(&mut self, point: FoldPoint, bias: Bias) -> ConcealPoint {
+        if self.passthrough {
+            return ConcealPoint(point.0);
+        }
         let cursor = &mut self.cursor;
         if cursor.did_seek() {
             cursor.seek_forward(&point, Bias::Right);
@@ -716,6 +945,14 @@ impl ConcealPointCursor<'_> {
 
 impl ConcealChunks<'_> {
     pub(crate) fn seek(&mut self, range: Range<ConcealOffset>) {
+        if self.passthrough {
+            self.fold_chunks
+                .seek(FoldOffset(range.start.0)..FoldOffset(range.end.0));
+            self.output_offset = range.start;
+            self.max_output_offset = range.end;
+            return;
+        }
+
         self.transform_cursor.seek(&range.start, Bias::Right);
 
         let fold_start = {
@@ -744,6 +981,7 @@ impl ConcealChunks<'_> {
         self.output_offset = range.start;
         self.max_output_offset = range.end;
         self.replacement_offset = 0;
+        self.needs_seek = false;
     }
 }
 
@@ -751,6 +989,10 @@ impl<'a> Iterator for ConcealChunks<'a> {
     type Item = Chunk<'a>;
 
     fn next(&mut self) -> Option<Self::Item> {
+        if self.passthrough {
+            return self.fold_chunks.next();
+        }
+
         if self.output_offset >= self.max_output_offset {
             return None;
         }
@@ -773,6 +1015,7 @@ impl<'a> Iterator for ConcealChunks<'a> {
             self.output_offset.0 += text.len();
             self.replacement_offset = 0;
             self.fold_chunk.take();
+            self.needs_seek = true;
             self.transform_cursor.next();
 
             return Some(if let Some(source) = highlight_chunk {
@@ -794,16 +1037,19 @@ impl<'a> Iterator for ConcealChunks<'a> {
         }
 
         // Isomorphic transform: forward the underlying fold chunk.
-        // Lazily seek fold_chunks when we don't have a cached chunk.
         if self.fold_chunk.is_none() {
-            let transform_end = self.transform_cursor.end();
-            let fold_end = if self.max_output_offset < transform_end.0 {
-                let overshoot = self.max_output_offset - self.transform_cursor.start().0;
-                self.transform_cursor.start().1 + overshoot
-            } else {
-                transform_end.1
-            };
-            self.fold_chunks.seek(self.fold_offset..fold_end);
+            if self.needs_seek {
+                // After a concealment, seek fold_chunks to the right position.
+                let transform_end = self.transform_cursor.end();
+                let fold_end = if self.max_output_offset < transform_end.0 {
+                    let overshoot = self.max_output_offset - self.transform_cursor.start().0;
+                    self.transform_cursor.start().1 + overshoot
+                } else {
+                    transform_end.1
+                };
+                self.fold_chunks.seek(self.fold_offset..fold_end);
+                self.needs_seek = false;
+            }
             let chunk_offset = self.fold_offset;
             self.fold_chunk = self.fold_chunks.next().map(|chunk| (chunk_offset, chunk));
         }

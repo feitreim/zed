@@ -21852,6 +21852,75 @@ impl Editor {
         });
     }
 
+    /// Rescans only the visible range for concealments, keeping existing
+    /// off-screen concealments intact. Used by Reparsed/Edited handlers
+    /// to avoid full-buffer scans on every reparse.
+    fn refresh_concealments_visible(&mut self, cx: &mut Context<Self>) {
+        if !self.concealed {
+            return;
+        }
+
+        let display_snapshot = self.display_map.update(cx, |map, cx| map.snapshot(cx));
+        let visible_range = self.multi_buffer_visible_range(&display_snapshot, cx);
+        let snapshot = self.buffer.read(cx).snapshot(cx);
+
+        let visible_start = snapshot.point_to_offset(visible_range.start);
+        let visible_end = snapshot.point_to_offset(visible_range.end);
+
+        // Keep existing concealments outside the visible range.
+        let mut concealments: Vec<(Range<Anchor>, gpui::SharedString)> = self
+            .display_map
+            .update(cx, |map, _cx| {
+                map.concealments()
+                    .iter()
+                    .filter(|(range, _)| {
+                        let start = range.start.to_offset(&snapshot);
+                        start < visible_start || start >= visible_end
+                    })
+                    .cloned()
+                    .collect()
+            });
+
+        // Source 1: tree-sitter queries for the visible range.
+        for (range, replacement) in snapshot.concealed_ranges(visible_start..visible_end) {
+            let start_anchor = snapshot.anchor_after(range.start);
+            let end_anchor = snapshot.anchor_before(range.end);
+            concealments.push((start_anchor..end_anchor, replacement));
+        }
+
+        // Source 2: settings-based string matching for the visible range.
+        let rules = EditorSettings::get_global(cx).conceal.rules.clone();
+        let language_name = self
+            .language_at(MultiBufferOffset(0), cx)
+            .map(|l| l.name().to_string());
+        let visible_text = snapshot
+            .text_for_range(visible_start..visible_end)
+            .collect::<String>();
+        for rule in &rules {
+            if !language_name.as_deref().is_some_and(|n| n == rule.language) {
+                continue;
+            }
+            for sub in &rule.substitutions {
+                let mut search_from = 0;
+                while let Some(pos) = visible_text[search_from..].find(sub.pattern.as_str()) {
+                    let start = visible_start + search_from + pos;
+                    let end = start + sub.pattern.len();
+                    let start_anchor = snapshot.anchor_after(start);
+                    let end_anchor = snapshot.anchor_before(end);
+                    concealments.push((
+                        start_anchor..end_anchor,
+                        gpui::SharedString::from(sub.replacement.clone()),
+                    ));
+                    search_from = search_from + pos + sub.pattern.len();
+                }
+            }
+        }
+
+        self.display_map.update(cx, |map, cx| {
+            map.set_concealments(concealments, cx);
+        });
+    }
+
     pub fn toggle_line_numbers(
         &mut self,
         _: &ToggleLineNumbers,
@@ -24555,10 +24624,11 @@ impl Editor {
                     }
                 }
 
-                // Re-scan for concealment patterns after every buffer edit so
-                // newly typed text (e.g. "lambda") gets concealed immediately.
-                if self.concealed {
-                    self.refresh_concealments(cx);
+                // When there's no grammar, Reparsed events won't fire, so refresh
+                // settings-based concealments on edit — scoped to the visible range
+                // to avoid a full-buffer scan on every keystroke.
+                if self.concealed && self.language_at(MultiBufferOffset(0), cx).is_none() {
+                    self.refresh_concealments_visible(cx);
                 }
 
                 cx.emit(EditorEvent::BufferEdited);
@@ -24646,9 +24716,7 @@ impl Editor {
                 self.refresh_runnables(Some(*buffer_id), window, cx);
                 self.refresh_selected_text_highlights(&self.display_snapshot(cx), true, window, cx);
                 self.colorize_brackets(true, cx);
-                if self.concealed {
-                    self.refresh_concealments(cx);
-                }
+                self.refresh_concealments_visible(cx);
                 jsx_tag_auto_close::refresh_enabled_in_any_buffer(self, multibuffer, cx);
 
                 cx.emit(EditorEvent::Reparsed(*buffer_id));
