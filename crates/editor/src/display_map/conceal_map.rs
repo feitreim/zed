@@ -40,11 +40,6 @@ impl Deref for ConcealSnapshot {
     }
 }
 
-// --- Transform types ---
-// Each node in the SumTree is a Transform. When replacement is None, it's
-// isomorphic (passthrough). When replacement is Some, the input text is
-// replaced with the replacement string in the display output.
-
 #[derive(Clone, Debug)]
 enum Transform {
     Isomorphic(MBTextSummary),
@@ -84,10 +79,6 @@ impl sum_tree::Item for Transform {
     }
 }
 
-/// Tracks both input (fold-space) and output (conceal-space) text summaries.
-/// For isomorphic nodes, input == output. For concealments, output is the
-/// replacement text's summary (shorter). The SumTree aggregates these, enabling
-/// O(log n) coordinate conversion between fold and conceal space.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 struct TransformSummary {
     input: MBTextSummary,
@@ -106,10 +97,6 @@ impl sum_tree::ContextLessSummary for TransformSummary {
 }
 
 pub type ConcealEdit = text::Edit<ConcealOffset>;
-
-// --- Coordinate types ---
-// Each pipeline layer defines its own Point/Offset types so the type system
-// prevents accidentally mixing coordinates from different layers.
 
 #[derive(Copy, Clone, Debug, Default, Eq, Ord, PartialOrd, PartialEq)]
 pub struct ConcealOffset(pub MultiBufferOffset);
@@ -172,8 +159,6 @@ impl<'a> sum_tree::Dimension<'a, TransformSummary> for ConcealOffset {
     }
 }
 
-/// A point (row, column) in conceal-output space. After concealment, "lambda"
-/// becomes "λ", so column values are shifted relative to FoldPoint.
 #[derive(Copy, Clone, Debug, Default, Eq, Ord, PartialOrd, PartialEq)]
 pub struct ConcealPoint(pub Point);
 
@@ -195,8 +180,6 @@ impl ConcealPoint {
     }
 }
 
-/// SumTree dimension impl: ConcealPoint tracks the *output* side of transforms.
-/// This lets the tree efficiently seek by conceal-space coordinates.
 impl<'a> sum_tree::Dimension<'a, TransformSummary> for ConcealPoint {
     fn zero(_cx: ()) -> Self {
         Default::default()
@@ -207,9 +190,6 @@ impl<'a> sum_tree::Dimension<'a, TransformSummary> for ConcealPoint {
     }
 }
 
-/// FoldPoint/FoldOffset track the *input* side of transforms, so the tree can
-/// also seek by fold-space coordinates. Combined with ConcealPoint/ConcealOffset
-/// (output side) via Dimensions<A, B>, this enables bidirectional conversion.
 impl<'a> sum_tree::Dimension<'a, TransformSummary> for FoldPoint {
     fn zero(_cx: ()) -> Self {
         Default::default()
@@ -230,13 +210,6 @@ impl<'a> sum_tree::Dimension<'a, TransformSummary> for FoldOffset {
     }
 }
 
-// --- Iterator structs ---
-
-/// Yields text chunks in conceal-output space. Walks the transform tree and the
-/// underlying fold chunks in parallel:
-/// - For concealment transforms: yields the replacement text with inherited highlighting
-/// - For isomorphic transforms: forwards chunks from the fold layer, slicing at
-///   transform boundaries
 pub struct ConcealChunks<'a> {
     passthrough: bool,
     transform_cursor: Cursor<'a, 'static, Transform, Dimensions<ConcealOffset, FoldOffset>>,
@@ -252,9 +225,6 @@ pub struct ConcealChunks<'a> {
     needs_seek: bool,
 }
 
-/// Iterates row metadata (soft wrap info, buffer row mapping) in conceal-space.
-/// Wraps the underlying FoldRows, skipping rows that are consumed by multi-line
-/// concealments (if any — most concealments are single-line).
 #[derive(Clone)]
 pub struct ConcealRows<'a> {
     cursor: Cursor<'a, 'static, Transform, Dimensions<ConcealPoint, FoldPoint>>,
@@ -262,12 +232,7 @@ pub struct ConcealRows<'a> {
     conceal_point: ConcealPoint,
 }
 
-// --- ConcealPoint / ConcealOffset methods ---
-
 impl ConcealPoint {
-    /// Maps a conceal-space point back to fold-space. For isomorphic regions this
-    /// is a simple offset addition. For concealment regions the point maps to the
-    /// start or end of the concealed fold range (depending on bias at call site).
     pub fn to_fold_point(self, snapshot: &ConcealSnapshot) -> FoldPoint {
         if snapshot.passthrough {
             return FoldPoint(self.0);
@@ -290,9 +255,6 @@ impl ConcealPoint {
         let mut offset = start.1.output.len;
         if !overshoot.is_zero() {
             if let Some(transform) = item {
-                // Must be isomorphic — you can't be "inside" a concealment's
-                // output at a row overshoot since replacements are typically
-                // single-line and short.
                 debug_assert!(!transform.is_concealment());
                 let end_fold_offset =
                     FoldPoint(start.1.input.lines + overshoot).to_offset(&snapshot.fold_snapshot);
@@ -316,7 +278,6 @@ impl ConcealOffset {
         if let Some(transform) = item {
             let overshoot = self.0 - start.1.output.len;
             if transform.is_concealment() {
-                // Inside a concealment — return start of the concealment in output space
                 ConcealPoint(start.1.output.lines)
             } else {
                 let fold_offset = FoldOffset(start.1.input.len + overshoot);
@@ -359,8 +320,6 @@ impl ConcealMap {
         (self.snapshot.clone(), edits)
     }
 
-    /// Absorb a new fold snapshot without rebuilding transforms. Use before
-    /// `set_concealments` to avoid a redundant rebuild.
     pub fn sync_fold_snapshot(&mut self, fold_snapshot: FoldSnapshot) {
         self.snapshot.fold_snapshot = fold_snapshot;
         self.prev_revealed_ranges = self.revealed_ranges.clone();
@@ -409,9 +368,6 @@ impl ConcealMap {
         self.revealed_ranges = revealed_ranges;
     }
 
-    /// Reconciles the conceal layer with upstream fold changes. Both reveal
-    /// changes and fold edits are handled incrementally by splicing affected
-    /// regions in the existing transform tree.
     fn sync(&mut self, fold_snapshot: FoldSnapshot, fold_edits: Vec<FoldEdit>) -> Vec<ConcealEdit> {
         let reveal_changed = self.revealed_ranges != self.prev_revealed_ranges;
 
@@ -425,9 +381,6 @@ impl ConcealMap {
         self.snapshot.fold_snapshot = fold_snapshot;
         self.snapshot.version += 1;
 
-        // Reveal-only change: compute the affected fold-offset ranges from
-        // the symmetric difference of old and new revealed ranges, then splice
-        // just those regions instead of rebuilding the entire tree.
         if fold_edits.is_empty() {
             let affected = self.reveal_affected_ranges();
             if affected.is_empty() {
@@ -528,9 +481,6 @@ impl ConcealMap {
             return conceal_edits.into_inner();
         }
 
-        // Incremental sync: walk the old transform tree and splice in edits,
-        // resolving concealments only in the edited regions. Follows the
-        // same pattern as InlayMap::sync.
         let resolved = self.resolve_concealments();
         let mut conceal_edits = Patch::default();
         let mut new_transforms = SumTree::default();
@@ -555,8 +505,6 @@ impl ConcealMap {
             cursor.seek(&fold_edit.old.end, Bias::Right);
             let old_end = cursor.start().1 + (fold_edit.old.end.0 - cursor.start().0.0);
 
-            // Build the new content for the edited region: isomorphic text
-            // interspersed with any concealments that fall in range.
             let prefix_start = FoldOffset(new_transforms.summary().input.len);
             let prefix_end = fold_edit.new.start;
             if prefix_end > prefix_start {
@@ -594,8 +542,6 @@ impl ConcealMap {
                 new: new_start..new_end,
             });
 
-            // If the next edit doesn't intersect the current transform,
-            // push its remainder.
             if fold_edits_iter
                 .peek()
                 .is_none_or(|edit| edit.old.start >= cursor.end().0)
@@ -647,8 +593,6 @@ impl ConcealMap {
         )
     }
 
-    /// Returns fold-offset ranges of concealments whose reveal state changed
-    /// between prev_revealed_ranges and revealed_ranges.
     fn reveal_affected_ranges(&self) -> Vec<Range<FoldOffset>> {
         if self.concealments.is_empty() {
             return Vec::new();
@@ -734,12 +678,7 @@ impl ConcealMap {
     }
 }
 
-// --- ConcealSnapshot impl ---
-
 impl ConcealSnapshot {
-    /// Maps a fold-space point to conceal-space. If the point falls inside a
-    /// concealment, it snaps to the start or end depending on bias (Left snaps
-    /// to start, Right snaps to end — this controls cursor behavior at boundaries).
     pub fn to_conceal_point(&self, point: FoldPoint, bias: Bias) -> ConcealPoint {
         if self.passthrough {
             return ConcealPoint(point.0);
@@ -783,8 +722,6 @@ impl ConcealSnapshot {
         (line_end - line_start) as u32
     }
 
-    /// Clamps a conceal point to a valid position. Points inside a concealment
-    /// snap to its boundary; points in isomorphic regions delegate to fold's clip_point.
     pub fn clip_point(&self, point: ConcealPoint, bias: Bias) -> ConcealPoint {
         if self.passthrough {
             return ConcealPoint(self.fold_snapshot.clip_point(FoldPoint(point.0), bias).0);
@@ -811,8 +748,6 @@ impl ConcealSnapshot {
         }
     }
 
-    /// Creates a forward-only cursor for efficient batch FoldPoint→ConcealPoint mapping.
-    /// Used by block_map which maps many points in ascending order.
     pub fn conceal_point_cursor(&self) -> ConcealPointCursor<'_> {
         let cursor = self
             .transforms
@@ -855,10 +790,6 @@ impl ConcealSnapshot {
         .flat_map(|chunk| chunk.text.chars())
     }
 
-    /// Creates a chunk iterator over the given conceal-offset range. For isomorphic
-    /// regions, chunks are forwarded from the fold layer. For concealments, the
-    /// replacement text is yielded instead, with syntax highlighting inherited from
-    /// the original text at that position.
     pub(crate) fn chunks<'a>(
         &'a self,
         range: Range<ConcealOffset>,
@@ -949,14 +880,6 @@ impl ConcealSnapshot {
         summary
     }
 
-    pub fn to_offset(&self, point: ConcealPoint) -> ConcealOffset {
-        point.to_offset(self)
-    }
-
-    pub fn to_point(&self, offset: ConcealOffset) -> ConcealPoint {
-        offset.to_point(self)
-    }
-
     #[cfg(test)]
     pub fn text(&self) -> String {
         self.chunks(
@@ -969,11 +892,6 @@ impl ConcealSnapshot {
     }
 }
 
-// --- ConcealPointCursor ---
-
-/// A forward-only cursor for efficient sequential FoldPoint→ConcealPoint mapping.
-/// Unlike to_conceal_point() which does a fresh tree search each call, this cursor
-/// remembers its position and uses seek_forward for O(log n) amortized traversal.
 pub struct ConcealPointCursor<'transforms> {
     passthrough: bool,
     cursor: Cursor<'transforms, 'static, Transform, Dimensions<FoldPoint, ConcealPoint>>,
@@ -1002,8 +920,6 @@ impl ConcealPointCursor<'_> {
         }
     }
 }
-
-// --- Iterator impls ---
 
 impl ConcealChunks<'_> {
     pub(crate) fn seek(&mut self, range: Range<ConcealOffset>) {
@@ -1062,12 +978,9 @@ impl<'a> Iterator for ConcealChunks<'a> {
         let transform = self.transform_cursor.item()?;
 
         if let Some(replacement) = transform.replacement_text() {
-            // Concealment: yield the replacement text instead of the original.
             let text = &replacement[self.replacement_offset..];
 
-            // Seek the fold chunks to the concealed range to grab the syntax
-            // highlighting from the original text. This makes "λ" inherit the
-            // highlight color of "lambda".
+            // Inherit syntax highlighting from the original concealed text.
             let conceal_fold_start = self.transform_cursor.start().1;
             let conceal_fold_end = self.transform_cursor.end().1;
             self.fold_chunks.seek(conceal_fold_start..conceal_fold_end);
@@ -1098,7 +1011,6 @@ impl<'a> Iterator for ConcealChunks<'a> {
             });
         }
 
-        // Isomorphic transform: forward the underlying fold chunk.
         if self.fold_chunk.is_none() {
             if self.needs_seek {
                 let transform_end = self.transform_cursor.end();
@@ -1115,10 +1027,6 @@ impl<'a> Iterator for ConcealChunks<'a> {
             self.fold_chunk = self.fold_chunks.next().map(|chunk| (chunk_offset, chunk));
         }
 
-        // Slice the fold chunk to fit within the current transform boundary.
-        // A single fold chunk may span multiple transforms, so we emit only the
-        // portion that belongs to the current one, advancing the transform cursor
-        // when we reach its end.
         let (chunk_start, chunk) = self.fold_chunk.clone()?;
         let chunk_end = chunk_start + chunk.text.len();
         let transform_end = self.transform_cursor.end().1;
@@ -1127,7 +1035,6 @@ impl<'a> Iterator for ConcealChunks<'a> {
         let bit_start = self.fold_offset - chunk_start;
         let bit_end = end - chunk_start;
         let text = &chunk.text[bit_start..bit_end];
-        // Shift the tab/char/newline bitmasks to match the sliced portion.
         let mask = 1u128.unbounded_shl(bit_end as u32).wrapping_sub(1);
         let tabs = (chunk.tabs >> bit_start) & mask;
         let chars = (chunk.chars >> bit_start) & mask;
@@ -1203,19 +1110,6 @@ impl Iterator for ConcealRows<'_> {
     }
 }
 
-// --- Helper functions ---
-
-/// Builds the SumTree<Transform> from scratch by resolving buffer-anchor
-/// concealments into fold-offset space, then emitting alternating isomorphic
-/// and replacement nodes.
-///
-/// The resolution pipeline for each concealment:
-///   buffer Anchor → buffer offset → inlay point → fold point → fold offset
-///
-/// Concealments that overlap a revealed range or collapse to zero width
-/// (e.g. inside a fold) are skipped.
-/// Resolves buffer-anchor concealments to fold-offset ranges, filtering out
-/// revealed ranges and zero-width results. Sorts and deduplicates overlaps.
 fn resolve_concealments(
     fold_snapshot: &FoldSnapshot,
     concealments: &[(Range<Anchor>, SharedString)],
@@ -1277,7 +1171,6 @@ fn build_transforms(
 
     let mut offset = FoldOffset(MultiBufferOffset(0));
     for (range, replacement) in &resolved {
-        // Emit isomorphic node for the gap before this concealment.
         if range.start > offset {
             let text_summary = fold_snapshot.text_summary_for_range(
                 offset.to_point(fold_snapshot)..range.start.to_point(fold_snapshot),
@@ -1285,10 +1178,6 @@ fn build_transforms(
             push_isomorphic(transforms, text_summary);
         }
 
-        // Emit a replacement node: input is the original text summary,
-        // output is the replacement string's summary. This is the core of
-        // concealment — the display pipeline sees the shorter replacement
-        // while the buffer retains the original text.
         let input_summary = fold_snapshot.text_summary_for_range(
             range.start.to_point(fold_snapshot)..range.end.to_point(fold_snapshot),
         );
@@ -1317,9 +1206,6 @@ fn build_transforms(
     }
 }
 
-/// Pushes an isomorphic (passthrough) transform, merging with the previous node
-/// if it's also isomorphic. This keeps the tree compact — consecutive passthrough
-/// regions become a single node rather than many small ones.
 fn push_isomorphic(transforms: &mut SumTree<Transform>, summary: MBTextSummary) {
     let mut did_merge = false;
     transforms.update_last(

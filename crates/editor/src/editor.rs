@@ -3785,9 +3785,6 @@ impl Editor {
             }
         }
 
-        // Cursor-level reveal: when concealments are active, reveal only
-        // the specific concealments that contain a cursor. This checks each
-        // cursor offset against the stored concealment ranges.
         if local && self.concealed {
             self.display_map.update(cx, |map, _cx| {
                 let cursor_offsets: Vec<MultiBufferOffset> = self
