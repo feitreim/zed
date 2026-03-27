@@ -15,37 +15,24 @@ use std::{
 use sum_tree::{Bias, Cursor, Dimensions, SumTree};
 use text::Patch;
 
-/// Mutable state for the conceal layer. Holds the current snapshot plus the
-/// concealment definitions and reveal state that drive the next rebuild.
 pub struct ConcealMap {
     snapshot: ConcealSnapshot,
-    /// The active concealments: each is a buffer anchor range (what to hide)
-    /// paired with a replacement string (what to show instead).
     concealments: Vec<(Range<Anchor>, SharedString)>,
-    /// Buffer ranges where concealments are suppressed (typically the cursor's line).
-    /// Any concealment overlapping a revealed range is skipped during build_transforms.
     revealed_ranges: Vec<Range<Anchor>>,
-    /// When true, revealed_ranges changed but the transform tree hasn't been rebuilt yet.
-    /// The next sync() call will pick this up and rebuild.
+    /// Dirty flag: set when revealed_ranges changes, cleared by the next sync().
     revealed_dirty: bool,
 }
 
-/// Immutable view of the conceal layer at a point in time. Derefs to
-/// FoldSnapshot so callers can transparently access fold/inlay/buffer data.
-/// The transforms SumTree is the core data structure mapping between
-/// fold-space (input) and conceal-space (output).
 #[derive(Clone)]
 pub struct ConcealSnapshot {
     pub fold_snapshot: FoldSnapshot,
     transforms: SumTree<Transform>,
-    /// When true, fold space == conceal space. All coordinate conversions
+    /// When true, fold space == conceal space — all coordinate conversions
     /// and chunk iteration skip the SumTree entirely.
     passthrough: bool,
     pub version: usize,
 }
 
-/// Deref to FoldSnapshot lets ConcealSnapshot transparently expose all
-/// fold/inlay/buffer methods. ConcealSnapshot adds conceal-specific methods.
 impl Deref for ConcealSnapshot {
     type Target = FoldSnapshot;
 
@@ -312,7 +299,6 @@ impl ConcealPoint {
                     FoldPoint(start.1.input.lines + overshoot).to_offset(&snapshot.fold_snapshot);
                 offset += end_fold_offset.0 - start.1.input.len;
             } else {
-                // Past the end of all transforms — clamp to document end.
                 return snapshot.len();
             }
         }
@@ -345,11 +331,7 @@ impl ConcealOffset {
     }
 }
 
-// --- ConcealMap impl ---
-
 impl ConcealMap {
-    /// Creates a new passthrough ConcealMap with no concealments. The initial
-    /// transform tree is a single isomorphic node spanning all fold output.
     pub fn new(fold_snapshot: FoldSnapshot) -> (Self, ConcealSnapshot) {
         let mut snapshot = ConcealSnapshot {
             transforms: SumTree::default(),
@@ -369,9 +351,6 @@ impl ConcealMap {
         )
     }
 
-    /// Called by the display pipeline during snapshot(). Syncs the conceal layer
-    /// with upstream fold changes and returns the updated snapshot + edits for
-    /// the next layer (TabMap) to consume.
     pub fn read(
         &mut self,
         fold_snapshot: FoldSnapshot,
@@ -381,10 +360,12 @@ impl ConcealMap {
         (self.snapshot.clone(), edits)
     }
 
-    /// Replaces the entire set of concealments and rebuilds the transform tree.
-    /// Returns a full-document edit if the output changed, or empty edits if not.
-    /// Called by DisplayMap::set_concealments when the editor toggles conceal or
-    /// refreshes after a buffer edit.
+    /// Absorb a new fold snapshot without rebuilding transforms. Use before
+    /// `set_concealments` to avoid a redundant rebuild.
+    pub fn sync_fold_snapshot(&mut self, fold_snapshot: FoldSnapshot) {
+        self.snapshot.fold_snapshot = fold_snapshot;
+    }
+
     pub fn set_concealments(
         &mut self,
         concealments: Vec<(Range<Anchor>, SharedString)>,
@@ -406,8 +387,6 @@ impl ConcealMap {
         self.snapshot.transforms = new_transforms;
         let new_len = self.snapshot.len();
 
-        // Only emit an edit if the output actually changed. This prevents
-        // unnecessary downstream pipeline work.
         let edits = if old_len == new_len
             && old_snapshot.transforms.summary().output == self.snapshot.transforms.summary().output
         {
@@ -425,24 +404,14 @@ impl ConcealMap {
         &self.concealments
     }
 
-    /// Updates the revealed ranges. The dirty flag is picked up on the next
-    /// sync() call (triggered by the render cycle taking a snapshot), which
-    /// rebuilds the transform tree excluding concealments on revealed lines.
     pub fn set_revealed_ranges(&mut self, revealed_ranges: Vec<Range<Anchor>>) {
         self.revealed_ranges = revealed_ranges;
         self.revealed_dirty = true;
     }
 
-    /// Reconciles the conceal layer with upstream fold changes.
-    ///
-    /// Three cases:
-    /// 1. No fold edits, no reveal change, same version → no-op (fast path)
-    /// 2. No fold edits but reveal changed → rebuild, emit full-doc edit only if output differs
-    /// 3. Fold edits present (buffer was edited):
-    ///    a. No concealments → passthrough: FoldOffset == ConcealOffset, safe to forward edits
-    ///    b. Concealments active → emit full-doc edit because fold-offsets and conceal-offsets
-    ///       diverge (e.g. "lambda" is 6 bytes in fold space but "λ" is 2 in conceal space).
-    ///       Forwarding fold edits as conceal edits would give the wrong ranges to downstream.
+    /// When concealments are active and fold edits arrive, we emit a full-doc
+    /// edit rather than forwarding fold edits as conceal edits, because fold-offsets
+    /// and conceal-offsets diverge (e.g. "lambda" is 6 bytes but "λ" is 2).
     fn sync(&mut self, fold_snapshot: FoldSnapshot, fold_edits: Vec<FoldEdit>) -> Vec<ConcealEdit> {
         let reveal_changed = self.revealed_dirty;
         self.revealed_dirty = false;
@@ -503,7 +472,6 @@ impl ConcealMap {
                 cursor.next();
             }
 
-            // Map old edit bounds to conceal-offset space.
             let old_start = cursor.start().1 + (fold_edit.old.start.0 - cursor.start().0.0);
             cursor.seek(&fold_edit.old.end, Bias::Right);
             let old_end = cursor.start().1 + (fold_edit.old.end.0 - cursor.start().0.0);
@@ -523,7 +491,6 @@ impl ConcealMap {
             }
             let new_start = ConcealOffset(new_transforms.summary().output.len);
 
-            // Insert concealments within the edited range.
             self.build_region(
                 &mut new_transforms,
                 &resolved,
@@ -531,7 +498,6 @@ impl ConcealMap {
                 fold_edit.new.end,
             );
 
-            // Fill any remaining gap to the edit end.
             let built = FoldOffset(new_transforms.summary().input.len);
             if built < fold_edit.new.end {
                 push_isomorphic(
@@ -593,58 +559,14 @@ impl ConcealMap {
         conceal_edits.into_inner()
     }
 
-    /// Resolves all concealments to fold offsets, filtering revealed ranges.
     fn resolve_concealments(&self) -> Vec<(Range<FoldOffset>, SharedString)> {
-        let buffer = &self.snapshot.fold_snapshot.inlay_snapshot.buffer;
-        let fold_snapshot = &self.snapshot.fold_snapshot;
-
-        let mut resolved: Vec<(Range<FoldOffset>, SharedString)> = self
-            .concealments
-            .iter()
-            .filter_map(|(range, replacement)| {
-                if self.revealed_ranges.iter().any(|revealed| {
-                    range.start.cmp(&revealed.end, buffer).is_lt()
-                        && range.end.cmp(&revealed.start, buffer).is_gt()
-                }) {
-                    return None;
-                }
-
-                let start_buffer_offset = range.start.to_offset(buffer);
-                let end_buffer_offset = range.end.to_offset(buffer);
-                let start_inlay_point = fold_snapshot
-                    .inlay_snapshot
-                    .to_inlay_point(buffer.offset_to_point(start_buffer_offset));
-                let end_inlay_point = fold_snapshot
-                    .inlay_snapshot
-                    .to_inlay_point(buffer.offset_to_point(end_buffer_offset));
-                let start_fold = fold_snapshot
-                    .to_fold_point(start_inlay_point, Bias::Right)
-                    .to_offset(fold_snapshot);
-                let end_fold = fold_snapshot
-                    .to_fold_point(end_inlay_point, Bias::Left)
-                    .to_offset(fold_snapshot);
-
-                if start_fold >= end_fold {
-                    return None;
-                }
-                Some((start_fold..end_fold, replacement.clone()))
-            })
-            .collect();
-
-        resolved.sort_by_key(|(range, _)| range.start);
-        let mut last_end = FoldOffset(MultiBufferOffset(0));
-        resolved.retain(|(range, _)| {
-            if range.start < last_end {
-                return false;
-            }
-            last_end = range.end;
-            true
-        });
-        resolved
+        resolve_concealments(
+            &self.snapshot.fold_snapshot,
+            &self.concealments,
+            &self.revealed_ranges,
+        )
     }
 
-    /// Builds transforms for a fold-offset region, inserting concealments that
-    /// fall within [start..end).
     fn build_region(
         &self,
         transforms: &mut SumTree<Transform>,
@@ -660,7 +582,6 @@ impl ConcealMap {
             let clamped_start = range.start.max(start);
             let clamped_end = range.end.min(end);
 
-            // Isomorphic gap before this concealment.
             let built = FoldOffset(transforms.summary().input.len);
             if clamped_start > built {
                 push_isomorphic(
@@ -1052,7 +973,6 @@ impl<'a> Iterator for ConcealChunks<'a> {
         // Isomorphic transform: forward the underlying fold chunk.
         if self.fold_chunk.is_none() {
             if self.needs_seek {
-                // After a concealment, seek fold_chunks to the right position.
                 let transform_end = self.transform_cursor.end();
                 let fold_end = if self.max_output_offset < transform_end.0 {
                     let overshoot = self.max_output_offset - self.transform_cursor.start().0;
@@ -1166,22 +1086,18 @@ impl Iterator for ConcealRows<'_> {
 ///
 /// Concealments that overlap a revealed range or collapse to zero width
 /// (e.g. inside a fold) are skipped.
-fn build_transforms(
-    transforms: &mut SumTree<Transform>,
+/// Resolves buffer-anchor concealments to fold-offset ranges, filtering out
+/// revealed ranges and zero-width results. Sorts and deduplicates overlaps.
+fn resolve_concealments(
     fold_snapshot: &FoldSnapshot,
     concealments: &[(Range<Anchor>, SharedString)],
     revealed_ranges: &[Range<Anchor>],
-) {
+) -> Vec<(Range<FoldOffset>, SharedString)> {
     let buffer = &fold_snapshot.inlay_snapshot.buffer;
 
-    // Phase 1: resolve each concealment's buffer anchors to fold offsets,
-    // filtering out revealed and degenerate ones.
     let mut resolved: Vec<(Range<FoldOffset>, SharedString)> = concealments
         .iter()
         .filter_map(|(range, replacement)| {
-            // Skip concealments that overlap with any revealed range.
-            // This is what makes line-based cursor reveal work: the cursor's
-            // line is added to revealed_ranges, suppressing concealments there.
             if revealed_ranges.iter().any(|revealed| {
                 range.start.cmp(&revealed.end, buffer).is_lt()
                     && range.end.cmp(&revealed.start, buffer).is_gt()
@@ -1189,34 +1105,28 @@ fn build_transforms(
                 return None;
             }
 
-            // Walk through the coordinate layers: buffer → inlay → fold
             let start_buffer_offset = range.start.to_offset(buffer);
             let end_buffer_offset = range.end.to_offset(buffer);
-
             let start_inlay_point = fold_snapshot
                 .inlay_snapshot
                 .to_inlay_point(buffer.offset_to_point(start_buffer_offset));
             let end_inlay_point = fold_snapshot
                 .inlay_snapshot
                 .to_inlay_point(buffer.offset_to_point(end_buffer_offset));
+            let start_fold = fold_snapshot
+                .to_fold_point(start_inlay_point, Bias::Right)
+                .to_offset(fold_snapshot);
+            let end_fold = fold_snapshot
+                .to_fold_point(end_inlay_point, Bias::Left)
+                .to_offset(fold_snapshot);
 
-            let start_fold_point = fold_snapshot.to_fold_point(start_inlay_point, Bias::Right);
-            let end_fold_point = fold_snapshot.to_fold_point(end_inlay_point, Bias::Left);
-
-            let start_fold = start_fold_point.to_offset(fold_snapshot);
-            let end_fold = end_fold_point.to_offset(fold_snapshot);
-
-            // Zero-width after folding means the concealment is entirely inside
-            // a fold — skip it since it's already hidden.
             if start_fold >= end_fold {
                 return None;
             }
-
             Some((start_fold..end_fold, replacement.clone()))
         })
         .collect();
 
-    // Phase 2: sort and deduplicate overlapping concealments (keep the first).
     resolved.sort_by_key(|(range, _)| range.start);
     let mut last_end = FoldOffset(MultiBufferOffset(0));
     resolved.retain(|(range, _)| {
@@ -1226,9 +1136,17 @@ fn build_transforms(
         last_end = range.end;
         true
     });
+    resolved
+}
 
-    // Phase 3: build the tree by walking sorted concealments left to right,
-    // emitting isomorphic gaps between them and replacement nodes for each.
+fn build_transforms(
+    transforms: &mut SumTree<Transform>,
+    fold_snapshot: &FoldSnapshot,
+    concealments: &[(Range<Anchor>, SharedString)],
+    revealed_ranges: &[Range<Anchor>],
+) {
+    let resolved = resolve_concealments(fold_snapshot, concealments, revealed_ranges);
+
     let mut offset = FoldOffset(MultiBufferOffset(0));
     for (range, replacement) in &resolved {
         // Emit isomorphic node for the gap before this concealment.
@@ -1303,15 +1221,27 @@ mod tests {
         cx.set_global(settings_store);
     }
 
-    #[gpui::test]
-    fn test_conceal_then_reveal(cx: &mut gpui::App) {
+    fn setup(
+        text: &str,
+        cx: &mut gpui::App,
+    ) -> (
+        ConcealMap,
+        FoldSnapshot,
+        multi_buffer::MultiBufferSnapshot,
+    ) {
         init_test(cx);
-        let text = "x = 2\nlambda x: x + 1\n";
         let buffer = MultiBuffer::build_simple(text, cx);
         let buffer_snapshot = buffer.read(cx).snapshot(cx);
         let (_, inlay_snapshot) = InlayMap::new(buffer_snapshot.clone());
         let (_, fold_snapshot) = super::super::fold_map::FoldMap::new(inlay_snapshot);
-        let (mut conceal_map, _) = ConcealMap::new(fold_snapshot.clone());
+        let (conceal_map, _) = ConcealMap::new(fold_snapshot.clone());
+        (conceal_map, fold_snapshot, buffer_snapshot)
+    }
+
+    #[gpui::test]
+    fn test_conceal_then_reveal(cx: &mut gpui::App) {
+        let (mut conceal_map, fold_snapshot, buffer_snapshot) =
+            setup("x = 2\nlambda x: x + 1\n", cx);
 
         let concealments = vec![(
             buffer_snapshot.anchor_after(O(6))..buffer_snapshot.anchor_before(O(12)),
@@ -1320,8 +1250,6 @@ mod tests {
         let (snapshot, _) = conceal_map.set_concealments(concealments);
         assert_eq!(snapshot.text(), "x = 2\nλ x: x + 1\n");
 
-        // Reveal via the deferred path (same as the real editor code path).
-        // set_revealed_ranges marks dirty, then read() triggers sync().
         let revealed =
             vec![buffer_snapshot.anchor_before(O(6))..buffer_snapshot.anchor_after(O(12))];
         conceal_map.set_revealed_ranges(revealed);
@@ -1336,31 +1264,19 @@ mod tests {
 
     #[gpui::test]
     fn test_basic_concealment(cx: &mut gpui::App) {
-        init_test(cx);
-        let buffer = MultiBuffer::build_simple("hello != world", cx);
-        let buffer_snapshot = buffer.read(cx).snapshot(cx);
-        let (_, inlay_snapshot) = InlayMap::new(buffer_snapshot.clone());
-        let (_, fold_snapshot) = super::super::fold_map::FoldMap::new(inlay_snapshot);
-        let (mut conceal_map, snapshot) = ConcealMap::new(fold_snapshot);
+        let (mut conceal_map, _, buffer_snapshot) = setup("hello != world", cx);
 
-        assert_eq!(snapshot.text(), "hello != world");
-
-        let start = buffer_snapshot.anchor_after(O(6));
-        let end = buffer_snapshot.anchor_before(O(8));
-
-        let (snapshot, _edits) = conceal_map.set_concealments(vec![(start..end, "≠".into())]);
+        let (snapshot, _) = conceal_map.set_concealments(vec![(
+            buffer_snapshot.anchor_after(O(6))..buffer_snapshot.anchor_before(O(8)),
+            "≠".into(),
+        )]);
 
         assert_eq!(snapshot.text(), "hello ≠ world");
     }
 
     #[gpui::test]
     fn test_multiple_concealments(cx: &mut gpui::App) {
-        init_test(cx);
-        let buffer = MultiBuffer::build_simple("a != b && c", cx);
-        let buffer_snapshot = buffer.read(cx).snapshot(cx);
-        let (_, inlay_snapshot) = InlayMap::new(buffer_snapshot.clone());
-        let (_, fold_snapshot) = super::super::fold_map::FoldMap::new(inlay_snapshot);
-        let (mut conceal_map, _) = ConcealMap::new(fold_snapshot);
+        let (mut conceal_map, _, buffer_snapshot) = setup("a != b && c", cx);
 
         let (snapshot, _) = conceal_map.set_concealments(vec![
             (
@@ -1378,12 +1294,7 @@ mod tests {
 
     #[gpui::test]
     fn test_concealment_point_conversion(cx: &mut gpui::App) {
-        init_test(cx);
-        let buffer = MultiBuffer::build_simple("lambda x: x", cx);
-        let buffer_snapshot = buffer.read(cx).snapshot(cx);
-        let (_, inlay_snapshot) = InlayMap::new(buffer_snapshot.clone());
-        let (_, fold_snapshot) = super::super::fold_map::FoldMap::new(inlay_snapshot);
-        let (mut conceal_map, _) = ConcealMap::new(fold_snapshot);
+        let (mut conceal_map, _, buffer_snapshot) = setup("lambda x: x", cx);
 
         let (snapshot, _) = conceal_map.set_concealments(vec![(
             buffer_snapshot.anchor_after(O(0))..buffer_snapshot.anchor_before(O(6)),
@@ -1407,12 +1318,7 @@ mod tests {
 
     #[gpui::test]
     fn test_concealment_clear(cx: &mut gpui::App) {
-        init_test(cx);
-        let buffer = MultiBuffer::build_simple("hello != world", cx);
-        let buffer_snapshot = buffer.read(cx).snapshot(cx);
-        let (_, inlay_snapshot) = InlayMap::new(buffer_snapshot.clone());
-        let (_, fold_snapshot) = super::super::fold_map::FoldMap::new(inlay_snapshot);
-        let (mut conceal_map, _) = ConcealMap::new(fold_snapshot);
+        let (mut conceal_map, _, buffer_snapshot) = setup("hello != world", cx);
 
         let (snapshot, _) = conceal_map.set_concealments(vec![(
             buffer_snapshot.anchor_after(O(6))..buffer_snapshot.anchor_before(O(8)),
@@ -1457,15 +1363,7 @@ mod tests {
 
     #[gpui::test]
     fn test_text_summary_across_concealment(cx: &mut gpui::App) {
-        init_test(cx);
-        // "lambda x" concealed to "λ x" — verify the summary reflects conceal-space,
-        // not fold-space. "lambda" (6 bytes) → "λ" (2 bytes), so the concealed line
-        // is 4 bytes shorter.
-        let buffer = MultiBuffer::build_simple("lambda x", cx);
-        let buffer_snapshot = buffer.read(cx).snapshot(cx);
-        let (_, inlay_snapshot) = InlayMap::new(buffer_snapshot.clone());
-        let (_, fold_snapshot) = super::super::fold_map::FoldMap::new(inlay_snapshot);
-        let (mut conceal_map, _) = ConcealMap::new(fold_snapshot);
+        let (mut conceal_map, _, buffer_snapshot) = setup("lambda x", cx);
 
         let (snapshot, _) = conceal_map.set_concealments(vec![(
             buffer_snapshot.anchor_after(O(0))..buffer_snapshot.anchor_before(O(6)),
@@ -1482,14 +1380,7 @@ mod tests {
 
     #[gpui::test]
     fn test_overlapping_concealments_keep_first(cx: &mut gpui::App) {
-        init_test(cx);
-        // Two overlapping concealments on "!==": "!=" → "≠" and "==" → "≡".
-        // Only the first (by position) should survive.
-        let buffer = MultiBuffer::build_simple("a !== b", cx);
-        let buffer_snapshot = buffer.read(cx).snapshot(cx);
-        let (_, inlay_snapshot) = InlayMap::new(buffer_snapshot.clone());
-        let (_, fold_snapshot) = super::super::fold_map::FoldMap::new(inlay_snapshot);
-        let (mut conceal_map, _) = ConcealMap::new(fold_snapshot);
+        let (mut conceal_map, _, buffer_snapshot) = setup("a !== b", cx);
 
         let (snapshot, _) = conceal_map.set_concealments(vec![
             (
@@ -1568,5 +1459,21 @@ mod tests {
         let (snapshot, _) = conceal_map.read(fold_snapshot, fold_edits);
 
         assert_eq!(snapshot.text(), "a ≠ b and c");
+    }
+
+    #[gpui::test]
+    fn test_multi_line_concealment(cx: &mut gpui::App) {
+        let (mut conceal_map, _, buffer_snapshot) = setup("if (\n  true\n):\n  pass\n", cx);
+
+        // Conceal "if" (offsets 0..2) with a single character; the space remains.
+        let (snapshot, _) = conceal_map.set_concealments(vec![(
+            buffer_snapshot.anchor_after(O(0))..buffer_snapshot.anchor_before(O(2)),
+            "⌥".into(),
+        )]);
+        assert_eq!(snapshot.text(), "⌥ (\n  true\n):\n  pass\n");
+
+        // Verify max_point and len reflect the concealed output.
+        assert_eq!(snapshot.max_point(), ConcealPoint::new(4, 0));
+        assert_eq!(snapshot.len().0, O("⌥ (\n  true\n):\n  pass\n".len()));
     }
 }
