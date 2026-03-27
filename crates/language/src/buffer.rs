@@ -5110,10 +5110,7 @@ impl BufferSnapshot {
     ) -> impl Iterator<Item = (Range<usize>, SharedString)> + '_ {
         let offset_range = range.start.to_offset(self)..range.end.to_offset(self);
         let mut syntax_matches = self.syntax.matches(offset_range, self, |grammar| {
-            grammar
-                .conceal_config
-                .as_ref()
-                .map(|config| &config.query)
+            grammar.conceal_config.as_ref().map(|config| &config.query)
         });
 
         let configs = syntax_matches

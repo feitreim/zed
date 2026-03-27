@@ -12,8 +12,8 @@ use std::{
     cmp,
     ops::{Add, AddAssign, Deref, Range, Sub, SubAssign},
 };
-use text::Patch;
 use sum_tree::{Bias, Cursor, Dimensions, SumTree};
+use text::Patch;
 
 /// Mutable state for the conceal layer. Holds the current snapshot plus the
 /// concealment definitions and reveal state that drive the next rebuild.
@@ -504,9 +504,9 @@ impl ConcealMap {
             }
 
             // Map old edit bounds to conceal-offset space.
-            let old_start = cursor.start().1 + (fold_edit.old.start.0 - cursor.start().0 .0);
+            let old_start = cursor.start().1 + (fold_edit.old.start.0 - cursor.start().0.0);
             cursor.seek(&fold_edit.old.end, Bias::Right);
-            let old_end = cursor.start().1 + (fold_edit.old.end.0 - cursor.start().0 .0);
+            let old_end = cursor.start().1 + (fold_edit.old.end.0 - cursor.start().0.0);
 
             // Build the new content for the edited region: isomorphic text
             // interspersed with any concealments that fall in range.
@@ -556,9 +556,8 @@ impl ConcealMap {
                 .is_none_or(|edit| edit.old.start >= cursor.end().0)
             {
                 let remainder_start = FoldOffset(new_transforms.summary().input.len);
-                let remainder_end = FoldOffset(
-                    fold_edit.new.end.0 + (cursor.end().0 .0 - fold_edit.old.end.0),
-                );
+                let remainder_end =
+                    FoldOffset(fold_edit.new.end.0 + (cursor.end().0.0 - fold_edit.old.end.0));
                 if remainder_end > remainder_start {
                     self.build_region(
                         &mut new_transforms,
@@ -1475,8 +1474,8 @@ mod tests {
         assert_eq!(snapshot.text(), "λ x");
 
         // Full range summary should match the concealed text, not the original.
-        let summary = snapshot
-            .text_summary_for_range(ConcealPoint::new(0, 0)..snapshot.max_point());
+        let summary =
+            snapshot.text_summary_for_range(ConcealPoint::new(0, 0)..snapshot.max_point());
         assert_eq!(summary.len, O(4)); // "λ x" = 2 + 1 + 1 = 4 bytes
         assert_eq!(summary.lines, Point::new(0, 4));
     }

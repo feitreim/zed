@@ -21816,9 +21816,7 @@ impl Editor {
 
         // Source 1: tree-sitter queries (syntax-aware)
         let buffer_len = snapshot.len();
-        for (range, replacement) in
-            snapshot.concealed_ranges(MultiBufferOffset(0)..buffer_len)
-        {
+        for (range, replacement) in snapshot.concealed_ranges(MultiBufferOffset(0)..buffer_len) {
             let start_anchor = snapshot.anchor_after(range.start);
             let end_anchor = snapshot.anchor_before(range.end);
             concealments.push((start_anchor..end_anchor, replacement));
@@ -21868,9 +21866,8 @@ impl Editor {
         let visible_end = snapshot.point_to_offset(visible_range.end);
 
         // Keep existing concealments outside the visible range.
-        let mut concealments: Vec<(Range<Anchor>, gpui::SharedString)> = self
-            .display_map
-            .update(cx, |map, _cx| {
+        let mut concealments: Vec<(Range<Anchor>, gpui::SharedString)> =
+            self.display_map.update(cx, |map, _cx| {
                 map.concealments()
                     .iter()
                     .filter(|(range, _)| {
