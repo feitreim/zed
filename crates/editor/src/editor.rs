@@ -21795,9 +21795,6 @@ impl Editor {
         self.refresh_concealments(cx);
     }
 
-    /// Collects concealment ranges from two sources and updates the display map:
-    /// 1. Tree-sitter `concealments.scm` queries (syntax-aware, per-language)
-    /// 2. Settings-based `conceal.rules` (user-defined string matching fallback)
     fn refresh_concealments(&mut self, cx: &mut Context<Self>) {
         if !self.concealed {
             self.display_map.update(cx, |map, cx| {
@@ -21806,53 +21803,25 @@ impl Editor {
             return;
         }
 
-        let rules = EditorSettings::get_global(cx).conceal.rules.clone();
-        let language_name = self
-            .language_at(MultiBufferOffset(0), cx)
-            .map(|l| l.name().to_string());
-
         let snapshot = self.buffer.read(cx).snapshot(cx);
+        let buffer_len = snapshot.len();
         let mut concealments = Vec::new();
 
-        // Source 1: tree-sitter queries (syntax-aware)
-        let buffer_len = snapshot.len();
         for (range, replacement) in snapshot.concealed_ranges(MultiBufferOffset(0)..buffer_len) {
-            let start_anchor = snapshot.anchor_after(range.start);
-            let end_anchor = snapshot.anchor_before(range.end);
-            concealments.push((start_anchor..end_anchor, replacement));
+            concealments.push((
+                snapshot.anchor_after(range.start)..snapshot.anchor_before(range.end),
+                replacement,
+            ));
         }
 
-        // Source 2: settings-based string matching fallback
         let text = snapshot.text();
-        for rule in &rules {
-            if !language_name.as_deref().is_some_and(|n| n == rule.language) {
-                continue;
-            }
-            for sub in &rule.substitutions {
-                let mut search_from = 0;
-                while let Some(pos) = text[search_from..].find(sub.pattern.as_str()) {
-                    let start = search_from + pos;
-                    let end = start + sub.pattern.len();
-                    let start_anchor =
-                        snapshot.anchor_after(multi_buffer::MultiBufferOffset(start));
-                    let end_anchor = snapshot.anchor_before(multi_buffer::MultiBufferOffset(end));
-                    concealments.push((
-                        start_anchor..end_anchor,
-                        gpui::SharedString::from(sub.replacement.clone()),
-                    ));
-                    search_from = end;
-                }
-            }
-        }
+        self.collect_rule_concealments(&text, MultiBufferOffset(0), &snapshot, &mut concealments, cx);
 
         self.display_map.update(cx, |map, cx| {
             map.set_concealments(concealments, cx);
         });
     }
 
-    /// Rescans only the visible range for concealments, keeping existing
-    /// off-screen concealments intact. Used by Reparsed/Edited handlers
-    /// to avoid full-buffer scans on every reparse.
     fn refresh_concealments_visible(&mut self, cx: &mut Context<Self>) {
         if !self.concealed {
             return;
@@ -21865,7 +21834,6 @@ impl Editor {
         let visible_start = snapshot.point_to_offset(visible_range.start);
         let visible_end = snapshot.point_to_offset(visible_range.end);
 
-        // Keep existing concealments outside the visible range.
         let mut concealments: Vec<(Range<Anchor>, gpui::SharedString)> =
             self.display_map.update(cx, |map, _cx| {
                 map.concealments()
@@ -21878,44 +21846,53 @@ impl Editor {
                     .collect()
             });
 
-        // Source 1: tree-sitter queries for the visible range.
         for (range, replacement) in snapshot.concealed_ranges(visible_start..visible_end) {
-            let start_anchor = snapshot.anchor_after(range.start);
-            let end_anchor = snapshot.anchor_before(range.end);
-            concealments.push((start_anchor..end_anchor, replacement));
+            concealments.push((
+                snapshot.anchor_after(range.start)..snapshot.anchor_before(range.end),
+                replacement,
+            ));
         }
 
-        // Source 2: settings-based string matching for the visible range.
+        let visible_text = snapshot
+            .text_for_range(visible_start..visible_end)
+            .collect::<String>();
+        self.collect_rule_concealments(&visible_text, visible_start, &snapshot, &mut concealments, cx);
+
+        self.display_map.update(cx, |map, cx| {
+            map.set_concealments(concealments, cx);
+        });
+    }
+
+    fn collect_rule_concealments(
+        &self,
+        text: &str,
+        base_offset: MultiBufferOffset,
+        snapshot: &multi_buffer::MultiBufferSnapshot,
+        concealments: &mut Vec<(Range<Anchor>, gpui::SharedString)>,
+        cx: &Context<Self>,
+    ) {
         let rules = EditorSettings::get_global(cx).conceal.rules.clone();
         let language_name = self
             .language_at(MultiBufferOffset(0), cx)
             .map(|l| l.name().to_string());
-        let visible_text = snapshot
-            .text_for_range(visible_start..visible_end)
-            .collect::<String>();
+
         for rule in &rules {
             if !language_name.as_deref().is_some_and(|n| n == rule.language) {
                 continue;
             }
             for sub in &rule.substitutions {
                 let mut search_from = 0;
-                while let Some(pos) = visible_text[search_from..].find(sub.pattern.as_str()) {
-                    let start = visible_start + search_from + pos;
+                while let Some(pos) = text[search_from..].find(sub.pattern.as_str()) {
+                    let start = base_offset + search_from + pos;
                     let end = start + sub.pattern.len();
-                    let start_anchor = snapshot.anchor_after(start);
-                    let end_anchor = snapshot.anchor_before(end);
                     concealments.push((
-                        start_anchor..end_anchor,
+                        snapshot.anchor_after(start)..snapshot.anchor_before(end),
                         gpui::SharedString::from(sub.replacement.clone()),
                     ));
                     search_from = search_from + pos + sub.pattern.len();
                 }
             }
         }
-
-        self.display_map.update(cx, |map, cx| {
-            map.set_concealments(concealments, cx);
-        });
     }
 
     pub fn toggle_line_numbers(

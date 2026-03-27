@@ -218,7 +218,6 @@ pub struct DisplayMap {
     inlay_map: InlayMap,
     /// Decides where the fold indicators should be and tracks parts of a source file that are currently folded.
     fold_map: FoldMap,
-    /// Handles text concealment (visual-only text replacement).
     conceal_map: ConcealMap,
     /// Keeps track of hard tabs in a buffer.
     tab_map: TabMap,
@@ -1276,10 +1275,8 @@ impl DisplayMap {
         let tab_size = Self::tab_size(&self.buffer, cx);
 
         let (snapshot, edits) = self.inlay_map.sync(snapshot, edits);
-        let (snapshot, edits) = self.fold_map.read(snapshot, edits);
-
-        // Sync conceal_map with pending edits, then apply new concealments
-        let (_snapshot, _edits) = self.conceal_map.read(snapshot, edits);
+        let (snapshot, _edits) = self.fold_map.read(snapshot, edits);
+        self.conceal_map.sync_fold_snapshot(snapshot);
         let (snapshot, edits) = self.conceal_map.set_concealments(concealments);
 
         let (snapshot, edits) = self.tab_map.sync(snapshot, edits, tab_size);
