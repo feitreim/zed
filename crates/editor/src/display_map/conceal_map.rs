@@ -881,10 +881,24 @@ impl ConcealSnapshot {
     }
 
     pub fn text_summary_for_range(&self, range: Range<ConcealPoint>) -> MBTextSummary {
-        let fold_start = range.start.to_fold_point(self);
-        let fold_end = range.end.to_fold_point(self);
-        self.fold_snapshot
-            .text_summary_for_range(fold_start..fold_end)
+        if self.passthrough {
+            let fold_start = FoldPoint(range.start.0);
+            let fold_end = FoldPoint(range.end.0);
+            return self
+                .fold_snapshot
+                .text_summary_for_range(fold_start..fold_end);
+        }
+
+        // Walk the transform tree to accumulate the correct output-space summary.
+        // Delegating to fold_snapshot would return fold-space (input) lengths,
+        // which are wrong when concealments shrink the displayed text.
+        let start_offset = range.start.to_offset(self);
+        let end_offset = range.end.to_offset(self);
+        let mut summary = MBTextSummary::default();
+        for chunk in self.chunks(start_offset..end_offset, false, Highlights::default()) {
+            summary += MBTextSummary::from(chunk.text);
+        }
+        summary
     }
 
     pub fn to_offset(&self, point: ConcealPoint) -> ConcealOffset {
@@ -1440,5 +1454,120 @@ mod tests {
         let (snapshot, _conceal_edits) = conceal_map.read(fold_snapshot, fold_edits);
 
         assert_eq!(snapshot.text(), "a ≠ bcd");
+    }
+
+    #[gpui::test]
+    fn test_text_summary_across_concealment(cx: &mut gpui::App) {
+        init_test(cx);
+        // "lambda x" concealed to "λ x" — verify the summary reflects conceal-space,
+        // not fold-space. "lambda" (6 bytes) → "λ" (2 bytes), so the concealed line
+        // is 4 bytes shorter.
+        let buffer = MultiBuffer::build_simple("lambda x", cx);
+        let buffer_snapshot = buffer.read(cx).snapshot(cx);
+        let (_, inlay_snapshot) = InlayMap::new(buffer_snapshot.clone());
+        let (_, fold_snapshot) = super::super::fold_map::FoldMap::new(inlay_snapshot);
+        let (mut conceal_map, _) = ConcealMap::new(fold_snapshot);
+
+        let (snapshot, _) = conceal_map.set_concealments(vec![(
+            buffer_snapshot.anchor_after(O(0))..buffer_snapshot.anchor_before(O(6)),
+            "λ".into(),
+        )]);
+        assert_eq!(snapshot.text(), "λ x");
+
+        // Full range summary should match the concealed text, not the original.
+        let summary = snapshot
+            .text_summary_for_range(ConcealPoint::new(0, 0)..snapshot.max_point());
+        assert_eq!(summary.len, O(4)); // "λ x" = 2 + 1 + 1 = 4 bytes
+        assert_eq!(summary.lines, Point::new(0, 4));
+    }
+
+    #[gpui::test]
+    fn test_overlapping_concealments_keep_first(cx: &mut gpui::App) {
+        init_test(cx);
+        // Two overlapping concealments on "!==": "!=" → "≠" and "==" → "≡".
+        // Only the first (by position) should survive.
+        let buffer = MultiBuffer::build_simple("a !== b", cx);
+        let buffer_snapshot = buffer.read(cx).snapshot(cx);
+        let (_, inlay_snapshot) = InlayMap::new(buffer_snapshot.clone());
+        let (_, fold_snapshot) = super::super::fold_map::FoldMap::new(inlay_snapshot);
+        let (mut conceal_map, _) = ConcealMap::new(fold_snapshot);
+
+        let (snapshot, _) = conceal_map.set_concealments(vec![
+            (
+                buffer_snapshot.anchor_after(O(2))..buffer_snapshot.anchor_before(O(4)),
+                "≠".into(),
+            ),
+            (
+                buffer_snapshot.anchor_after(O(3))..buffer_snapshot.anchor_before(O(5)),
+                "≡".into(),
+            ),
+        ]);
+
+        // "!=" at 2..4 wins, "==" at 3..5 overlaps and is dropped.
+        assert_eq!(snapshot.text(), "a ≠= b");
+    }
+
+    #[gpui::test]
+    fn test_incremental_sync_edit_near_concealment(cx: &mut gpui::App) {
+        init_test(cx);
+        // Edit text before a concealment — verify the concealment survives
+        // and the sync produces correct output.
+        let buffer = MultiBuffer::build_simple("hello != world", cx);
+        let buffer_snapshot = buffer.read(cx).snapshot(cx);
+        let (mut inlay_map, inlay_snapshot) = InlayMap::new(buffer_snapshot.clone());
+        let (mut fold_map, fold_snapshot) = super::super::fold_map::FoldMap::new(inlay_snapshot);
+        let (mut conceal_map, _) = ConcealMap::new(fold_snapshot);
+
+        let (snapshot, _) = conceal_map.set_concealments(vec![(
+            buffer_snapshot.anchor_after(O(6))..buffer_snapshot.anchor_before(O(8)),
+            "≠".into(),
+        )]);
+        assert_eq!(snapshot.text(), "hello ≠ world");
+
+        let subscription = buffer.update(cx, |buffer, _| buffer.subscribe());
+
+        // Insert "dear " before "hello" — shifts the concealment right.
+        buffer.update(cx, |buffer, cx| {
+            buffer.edit([(O(0)..O(0), "dear ")], None, cx);
+        });
+        let buffer_snapshot = buffer.read(cx).snapshot(cx);
+        let edits = subscription.consume().into_inner();
+
+        let (inlay_snapshot, inlay_edits) = inlay_map.sync(buffer_snapshot, edits);
+        let (fold_snapshot, fold_edits) = fold_map.read(inlay_snapshot, inlay_edits);
+        let (snapshot, _) = conceal_map.read(fold_snapshot, fold_edits);
+
+        assert_eq!(snapshot.text(), "dear hello ≠ world");
+    }
+
+    #[gpui::test]
+    fn test_incremental_sync_edit_after_concealment(cx: &mut gpui::App) {
+        init_test(cx);
+        let buffer = MultiBuffer::build_simple("a != b", cx);
+        let buffer_snapshot = buffer.read(cx).snapshot(cx);
+        let (mut inlay_map, inlay_snapshot) = InlayMap::new(buffer_snapshot.clone());
+        let (mut fold_map, fold_snapshot) = super::super::fold_map::FoldMap::new(inlay_snapshot);
+        let (mut conceal_map, _) = ConcealMap::new(fold_snapshot);
+
+        let (snapshot, _) = conceal_map.set_concealments(vec![(
+            buffer_snapshot.anchor_after(O(2))..buffer_snapshot.anchor_before(O(4)),
+            "≠".into(),
+        )]);
+        assert_eq!(snapshot.text(), "a ≠ b");
+
+        let subscription = buffer.update(cx, |buffer, _| buffer.subscribe());
+
+        // Append " and c" after "b".
+        buffer.update(cx, |buffer, cx| {
+            buffer.edit([(O(6)..O(6), " and c")], None, cx);
+        });
+        let buffer_snapshot = buffer.read(cx).snapshot(cx);
+        let edits = subscription.consume().into_inner();
+
+        let (inlay_snapshot, inlay_edits) = inlay_map.sync(buffer_snapshot, edits);
+        let (fold_snapshot, fold_edits) = fold_map.read(inlay_snapshot, inlay_edits);
+        let (snapshot, _) = conceal_map.read(fold_snapshot, fold_edits);
+
+        assert_eq!(snapshot.text(), "a ≠ b and c");
     }
 }
