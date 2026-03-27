@@ -21832,15 +21832,15 @@ impl Editor {
             }
             for sub in &rule.substitutions {
                 let mut search_from = 0;
-                while let Some(pos) = text[search_from..].find(sub.ugly.as_str()) {
+                while let Some(pos) = text[search_from..].find(sub.pattern.as_str()) {
                     let start = search_from + pos;
-                    let end = start + sub.ugly.len();
+                    let end = start + sub.pattern.len();
                     let start_anchor =
                         snapshot.anchor_after(multi_buffer::MultiBufferOffset(start));
                     let end_anchor = snapshot.anchor_before(multi_buffer::MultiBufferOffset(end));
                     concealments.push((
                         start_anchor..end_anchor,
-                        gpui::SharedString::from(sub.pretty.clone()),
+                        gpui::SharedString::from(sub.replacement.clone()),
                     ));
                     search_from = end;
                 }

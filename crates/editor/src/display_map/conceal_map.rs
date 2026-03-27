@@ -1,17 +1,5 @@
-// ConcealMap: a display pipeline layer that visually replaces text ranges with
-// shorter substitutes (e.g. "lambda" → "λ"). It sits between FoldMap and TabMap:
-//
+// Display pipeline layer for visual text replacement.
 //   InlayMap → FoldMap → **ConcealMap** → TabMap → WrapMap → BlockMap
-//
-// Like FoldMap, it uses a SumTree<Transform> where each node is either:
-//   - Isomorphic: input passes through unchanged (input == output summary)
-//   - Concealment: input text is replaced with a shorter string (input ≠ output)
-//
-// Concealments are stored as buffer Anchors so they survive edits. On each sync,
-// anchors are resolved to FoldOffsets and the transform tree is rebuilt.
-//
-// Revealed ranges (driven by cursor position) suppress concealments on those lines,
-// letting the user see and edit the original text.
 
 use super::{
     Highlights,
@@ -25,7 +13,6 @@ use std::{
     ops::{Add, AddAssign, Deref, Range, Sub, SubAssign},
 };
 use sum_tree::{Bias, Cursor, Dimensions, SumTree};
-
 
 /// Mutable state for the conceal layer. Holds the current snapshot plus the
 /// concealment definitions and reveal state that drive the next rebuild.
@@ -312,7 +299,7 @@ impl ConcealPoint {
                 // Must be isomorphic — you can't be "inside" a concealment's
                 // output at a row overshoot since replacements are typically
                 // single-line and short.
-                assert!(!transform.is_concealment());
+                debug_assert!(!transform.is_concealment());
                 let end_fold_offset =
                     FoldPoint(start.1.input.lines + overshoot).to_offset(&snapshot.fold_snapshot);
                 offset += end_fold_offset.0 - start.1.input.len;
@@ -972,7 +959,14 @@ fn build_transforms(
 
     // Phase 2: sort and deduplicate overlapping concealments (keep the first).
     resolved.sort_by_key(|(range, _)| range.start);
-    resolved.dedup_by(|b, a| b.0.start < a.0.end);
+    let mut last_end = FoldOffset(MultiBufferOffset(0));
+    resolved.retain(|(range, _)| {
+        if range.start < last_end {
+            return false;
+        }
+        last_end = range.end;
+        true
+    });
 
     // Phase 3: build the tree by walking sorted concealments left to right,
     // emitting isomorphic gaps between them and replacement nodes for each.

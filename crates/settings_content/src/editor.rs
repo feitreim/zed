@@ -1080,8 +1080,8 @@ pub struct ConcealContent {
     ///       {
     ///         "language": "Python",
     ///         "substitutions": [
-    ///           { "ugly": "lambda", "pretty": "λ" },
-    ///           { "ugly": "!=", "pretty": "≠" }
+    ///           { "pattern": "lambda", "replacement": "λ" },
+    ///           { "pattern": "!=", "replacement": "≠" }
     ///         ]
     ///       }
     ///     ]
@@ -1102,7 +1102,7 @@ pub struct ConcealLanguageRule {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct ConcealSubstitution {
     /// The text pattern to match and hide.
-    pub ugly: String,
+    pub pattern: String,
     /// The replacement text to display instead.
-    pub pretty: String,
+    pub replacement: String,
 }
