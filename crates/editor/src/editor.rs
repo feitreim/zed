@@ -21878,6 +21878,9 @@ impl Editor {
                 continue;
             }
             for sub in &rule.substitutions {
+                if sub.pattern.is_empty() {
+                    continue;
+                }
                 let mut search_from = 0;
                 while let Some(pos) = text[search_from..].find(sub.pattern.as_str()) {
                     let start = base_offset + search_from + pos;
