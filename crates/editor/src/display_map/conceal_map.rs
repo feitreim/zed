@@ -5,6 +5,7 @@ use super::{
     Highlights,
     fold_map::{Chunk, FoldChunks, FoldEdit, FoldOffset, FoldPoint, FoldRows, FoldSnapshot},
 };
+use collections::HashSet;
 use gpui::SharedString;
 use language::{LanguageAwareStyling, Point};
 use multi_buffer::{Anchor, MBTextSummary, MultiBufferOffset, RowInfo, ToOffset};
@@ -23,8 +24,8 @@ pub struct ConcealMap {
     /// Recomputed when the fold snapshot or concealments change.
     cached_fold_ranges: Vec<Option<Range<FoldOffset>>>,
     /// Indices into `concealments` that are currently revealed (cursor is on them).
-    revealed_indices: Vec<usize>,
-    prev_revealed_indices: Vec<usize>,
+    revealed_indices: HashSet<usize>,
+    prev_revealed_indices: HashSet<usize>,
 }
 
 #[derive(Clone)]
@@ -228,7 +229,6 @@ pub struct ConcealChunks<'a> {
     /// a wide range on concealment seeks so it stays positioned for the next
     /// isomorphic region without a second seek.
     max_fold_offset: FoldOffset,
-    replacement_offset: usize,
 }
 
 #[derive(Clone)]
@@ -314,8 +314,8 @@ impl ConcealMap {
                 snapshot: snapshot.clone(),
                 concealments: Vec::new(),
                 cached_fold_ranges: Vec::new(),
-                revealed_indices: Vec::new(),
-                prev_revealed_indices: Vec::new(),
+                revealed_indices: HashSet::default(),
+                prev_revealed_indices: HashSet::default(),
             },
             snapshot,
         )
@@ -335,6 +335,7 @@ impl ConcealMap {
         self.prev_revealed_indices = self.revealed_indices.clone();
     }
 
+    #[ztracing::instrument(skip_all)]
     pub fn set_concealments(
         &mut self,
         concealments: Vec<(Range<Anchor>, SharedString)>,
@@ -375,11 +376,12 @@ impl ConcealMap {
         &self.concealments
     }
 
-    pub fn set_revealed_indices(&mut self, indices: Vec<usize>) {
+    pub fn set_revealed_indices(&mut self, indices: HashSet<usize>) {
         std::mem::swap(&mut self.prev_revealed_indices, &mut self.revealed_indices);
         self.revealed_indices = indices;
     }
 
+    #[ztracing::instrument(skip_all)]
     fn sync(&mut self, fold_snapshot: FoldSnapshot, fold_edits: Vec<FoldEdit>) -> Vec<ConcealEdit> {
         let reveal_changed = self.revealed_indices != self.prev_revealed_indices;
 
@@ -424,35 +426,14 @@ impl ConcealMap {
                 cursor.seek(&affected_range.end, Bias::Right);
                 let old_end = cursor.start().1 + (affected_range.end.0 - cursor.start().0.0);
 
-                let prefix_start = FoldOffset(new_transforms.summary().input.len);
-                if affected_range.start > prefix_start {
-                    push_isomorphic(
-                        &mut new_transforms,
-                        self.snapshot.fold_snapshot.text_summary_for_range(
-                            prefix_start.to_point(&self.snapshot.fold_snapshot)
-                                ..affected_range.start.to_point(&self.snapshot.fold_snapshot),
-                        ),
-                    );
-                }
+                self.fill_isomorphic_gap(&mut new_transforms, affected_range.start);
                 let new_start = ConcealOffset(new_transforms.summary().output.len);
-
-                self.build_region(
+                self.build_region_filled(
                     &mut new_transforms,
                     &resolved,
                     affected_range.start,
                     affected_range.end,
                 );
-
-                let built = FoldOffset(new_transforms.summary().input.len);
-                if built < affected_range.end {
-                    push_isomorphic(
-                        &mut new_transforms,
-                        self.snapshot.fold_snapshot.text_summary_for_range(
-                            built.to_point(&self.snapshot.fold_snapshot)
-                                ..affected_range.end.to_point(&self.snapshot.fold_snapshot),
-                        ),
-                    );
-                }
                 let new_end = ConcealOffset(new_transforms.summary().output.len);
 
                 conceal_edits.push(text::Edit {
@@ -520,36 +501,14 @@ impl ConcealMap {
             cursor.seek(&fold_edit.old.end, Bias::Right);
             let old_end = cursor.start().1 + (fold_edit.old.end.0 - cursor.start().0.0);
 
-            let prefix_start = FoldOffset(new_transforms.summary().input.len);
-            let prefix_end = fold_edit.new.start;
-            if prefix_end > prefix_start {
-                push_isomorphic(
-                    &mut new_transforms,
-                    self.snapshot.fold_snapshot.text_summary_for_range(
-                        prefix_start.to_point(&self.snapshot.fold_snapshot)
-                            ..prefix_end.to_point(&self.snapshot.fold_snapshot),
-                    ),
-                );
-            }
+            self.fill_isomorphic_gap(&mut new_transforms, fold_edit.new.start);
             let new_start = ConcealOffset(new_transforms.summary().output.len);
-
-            self.build_region(
+            self.build_region_filled(
                 &mut new_transforms,
                 &resolved,
                 fold_edit.new.start,
                 fold_edit.new.end,
             );
-
-            let built = FoldOffset(new_transforms.summary().input.len);
-            if built < fold_edit.new.end {
-                push_isomorphic(
-                    &mut new_transforms,
-                    self.snapshot.fold_snapshot.text_summary_for_range(
-                        built.to_point(&self.snapshot.fold_snapshot)
-                            ..fold_edit.new.end.to_point(&self.snapshot.fold_snapshot),
-                    ),
-                );
-            }
             let new_end = ConcealOffset(new_transforms.summary().output.len);
 
             conceal_edits.push(text::Edit {
@@ -565,22 +524,12 @@ impl ConcealMap {
                 let remainder_end =
                     FoldOffset(fold_edit.new.end.0 + (cursor.end().0.0 - fold_edit.old.end.0));
                 if remainder_end > remainder_start {
-                    self.build_region(
+                    self.build_region_filled(
                         &mut new_transforms,
                         &resolved,
                         remainder_start,
                         remainder_end,
                     );
-                    let built = FoldOffset(new_transforms.summary().input.len);
-                    if built < remainder_end {
-                        push_isomorphic(
-                            &mut new_transforms,
-                            self.snapshot.fold_snapshot.text_summary_for_range(
-                                built.to_point(&self.snapshot.fold_snapshot)
-                                    ..remainder_end.to_point(&self.snapshot.fold_snapshot),
-                            ),
-                        );
-                    }
                 }
                 cursor.next();
             }
@@ -679,6 +628,30 @@ impl ConcealMap {
         }
         affected.sort_by_key(|r| r.start);
         affected
+    }
+
+    fn fill_isomorphic_gap(&self, transforms: &mut SumTree<Transform>, target: FoldOffset) {
+        let fold_snapshot = &self.snapshot.fold_snapshot;
+        let current = FoldOffset(transforms.summary().input.len);
+        if target > current {
+            push_isomorphic(
+                transforms,
+                fold_snapshot.text_summary_for_range(
+                    current.to_point(fold_snapshot)..target.to_point(fold_snapshot),
+                ),
+            );
+        }
+    }
+
+    fn build_region_filled(
+        &self,
+        transforms: &mut SumTree<Transform>,
+        resolved: &[(Range<FoldOffset>, SharedString)],
+        region_start: FoldOffset,
+        region_end: FoldOffset,
+    ) {
+        self.build_region(transforms, resolved, region_start, region_end);
+        self.fill_isomorphic_gap(transforms, region_end);
     }
 
     fn build_region(
@@ -862,7 +835,6 @@ impl ConcealSnapshot {
                 output_offset: range.start,
                 max_output_offset: range.end,
                 max_fold_offset: fold_end,
-                replacement_offset: 0,
             };
         }
 
@@ -924,7 +896,6 @@ impl ConcealSnapshot {
             output_offset: range.start,
             max_output_offset: range.end,
             max_fold_offset,
-            replacement_offset: 0,
         }
     }
 
@@ -1028,7 +999,6 @@ impl ConcealChunks<'_> {
         self.fold_offset = fold_start;
         self.output_offset = range.start;
         self.max_output_offset = range.end;
-        self.replacement_offset = 0;
 
         let mut end_cursor = self
             .transforms
@@ -1062,7 +1032,7 @@ impl<'a> Iterator for ConcealChunks<'a> {
         let transform = self.transform_cursor.item()?;
 
         if let Some(replacement) = transform.replacement_text() {
-            let text = &replacement[self.replacement_offset..];
+            let text = replacement.as_ref();
 
             let conceal_fold_start = self.transform_cursor.start().1;
             let conceal_fold_end = self.transform_cursor.end().1;
@@ -1098,7 +1068,6 @@ impl<'a> Iterator for ConcealChunks<'a> {
 
             self.fold_offset = conceal_fold_end;
             self.output_offset.0 += text.len();
-            self.replacement_offset = 0;
             self.transform_cursor.next();
 
             return Some(if let Some(source) = highlight_chunk {
@@ -1276,6 +1245,7 @@ mod tests {
     use crate::{MultiBuffer, display_map::inlay_map::InlayMap};
     use gpui;
     use multi_buffer::MultiBufferOffset as O;
+    use rand::rngs::StdRng;
     use settings::SettingsStore;
 
     fn init_test(cx: &mut gpui::App) {
@@ -1308,12 +1278,12 @@ mod tests {
         let (snapshot, _) = conceal_map.set_concealments(concealments);
         assert_eq!(snapshot.text(), "x = 2\nλ x: x + 1\n");
 
-        conceal_map.set_revealed_indices(vec![0]);
+        conceal_map.set_revealed_indices(HashSet::from_iter([0]));
         let (snapshot, _) = conceal_map.read(fold_snapshot.clone(), vec![]);
         assert_eq!(snapshot.text(), "x = 2\nlambda x: x + 1\n");
 
         // Re-conceal (cursor moved away)
-        conceal_map.set_revealed_indices(vec![]);
+        conceal_map.set_revealed_indices(HashSet::default());
         let (snapshot, _) = conceal_map.read(fold_snapshot, vec![]);
         assert_eq!(snapshot.text(), "x = 2\nλ x: x + 1\n");
     }
@@ -1709,5 +1679,138 @@ mod tests {
         let chunks = snapshot.chunks(mid2..snapshot.len(), false, Highlights::default());
         let after_seek2: String = chunks.map(|c| c.text.to_string()).collect();
         assert_eq!(after_seek2, "≡ end");
+    }
+
+    #[gpui::test(iterations = 100)]
+    fn test_random_concealments(cx: &mut gpui::App, mut rng: StdRng) {
+        use rand::Rng;
+
+        init_test(cx);
+
+        // Generate random text (3-10 lines, 5-20 chars each).
+        let num_lines = rng.random_range(1..=10);
+        let mut text = String::new();
+        for i in 0..num_lines {
+            let len = rng.random_range(5..=20);
+            for _ in 0..len {
+                let c = rng.random_range(b'a'..=b'z') as char;
+                text.push(c);
+            }
+            if i < num_lines - 1 {
+                text.push('\n');
+            }
+        }
+
+        let buffer = MultiBuffer::build_simple(&text, cx);
+        let buffer_snapshot = buffer.read(cx).snapshot(cx);
+        let (mut inlay_map, inlay_snapshot) = InlayMap::new(buffer_snapshot.clone());
+        let (mut fold_map, fold_snapshot) = super::super::fold_map::FoldMap::new(inlay_snapshot);
+        let (mut conceal_map, _) = ConcealMap::new(fold_snapshot.clone());
+
+        // Generate random non-overlapping concealments.
+        let text_len = text.len();
+        let num_concealments = rng.random_range(0..=6);
+        let mut ranges: Vec<(usize, usize)> = Vec::new();
+        for _ in 0..num_concealments {
+            if text_len < 3 {
+                break;
+            }
+            let start = rng.random_range(0..text_len.saturating_sub(2));
+            let max_len = (text_len - start).min(5);
+            if max_len < 1 {
+                continue;
+            }
+            let len = rng.random_range(1..=max_len);
+            let end = start + len;
+            // Skip if overlapping an existing range.
+            if ranges.iter().any(|&(s, e)| start < e && end > s) {
+                continue;
+            }
+            ranges.push((start, end));
+        }
+        ranges.sort_by_key(|&(s, _)| s);
+
+        let concealments: Vec<_> = ranges
+            .iter()
+            .map(|&(start, end)| {
+                (
+                    buffer_snapshot.anchor_after(O(start))..buffer_snapshot.anchor_before(O(end)),
+                    SharedString::from("•"),
+                )
+            })
+            .collect();
+
+        let (snapshot, _) = conceal_map.set_concealments(concealments.clone());
+
+        // Verify: concealed text length matches chunks.
+        let text_from_chunks = snapshot.text();
+        let expected_len = snapshot.len();
+        assert_eq!(
+            text_from_chunks.len(),
+            expected_len.0.0,
+            "text len mismatch after set_concealments"
+        );
+
+        // Verify point round-trips.
+        let max_point = snapshot.max_point();
+        for row in 0..=max_point.row() {
+            let line_len = snapshot.line_len(row);
+            let start = ConcealPoint::new(row, 0);
+            let end = ConcealPoint::new(row, line_len);
+            let start_offset = start.to_offset(&snapshot);
+            let end_offset = end.to_offset(&snapshot);
+            assert!(
+                end_offset >= start_offset,
+                "line {row}: end offset < start offset"
+            );
+            let back = start_offset.to_point(&snapshot);
+            assert_eq!(back, start, "round-trip offset→point for row {row}");
+        }
+
+        // Randomly reveal some concealments.
+        if !concealments.is_empty() {
+            let reveal_count = rng.random_range(0..=concealments.len());
+            let revealed: HashSet<usize> = (0..concealments.len())
+                .filter(|_| rng.random_bool(0.5))
+                .take(reveal_count)
+                .collect();
+            conceal_map.set_revealed_indices(revealed);
+            let (snapshot, _) = conceal_map.read(fold_snapshot, vec![]);
+
+            // After reveal, text should still be self-consistent.
+            let text_after_reveal = snapshot.text();
+            assert_eq!(
+                text_after_reveal.len(),
+                snapshot.len().0.0,
+                "text len mismatch after reveal"
+            );
+        }
+
+        // Simulate a buffer edit and sync through the pipeline.
+        let subscription = buffer.update(cx, |buffer, _| buffer.subscribe());
+        let edit_start = rng.random_range(0..=text_len);
+        let edit_end = rng.random_range(edit_start..=text_len);
+        let insert_len = rng.random_range(0..=5);
+        let insert: String = (0..insert_len)
+            .map(|_| rng.random_range(b'a'..=b'z') as char)
+            .collect();
+
+        buffer.update(cx, |buffer, cx| {
+            buffer.edit([(O(edit_start)..O(edit_end), insert.as_str())], None, cx);
+        });
+        let buffer_snapshot = buffer.read(cx).snapshot(cx);
+        let edits = subscription.consume().into_inner();
+
+        let (inlay_snapshot, inlay_edits) = inlay_map.sync(buffer_snapshot, edits);
+        let (fold_snapshot, fold_edits) = fold_map.read(inlay_snapshot, inlay_edits);
+        let (snapshot, _) = conceal_map.read(fold_snapshot, fold_edits);
+
+        // Final consistency: text length matches len().
+        let final_text = snapshot.text();
+        assert_eq!(
+            final_text.len(),
+            snapshot.len().0.0,
+            "text len mismatch after edit sync"
+        );
     }
 }

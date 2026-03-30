@@ -1286,7 +1286,7 @@ impl DisplayMap {
         self.block_map.read(snapshot, edits, None);
     }
 
-    pub fn update_revealed_indices(&mut self, indices: Vec<usize>, _cx: &mut Context<Self>) {
+    pub fn update_revealed_indices(&mut self, indices: HashSet<usize>, _cx: &mut Context<Self>) {
         self.conceal_map.set_revealed_indices(indices);
     }
 
@@ -4374,7 +4374,7 @@ pub mod tests {
 
         // Reveal concealment at index 0
         map.update(cx, |map, cx| {
-            map.update_revealed_indices(vec![0], cx);
+            map.update_revealed_indices(HashSet::from_iter([0]), cx);
         });
 
         let snapshot = map.update(cx, |map, cx| map.snapshot(cx));
@@ -4425,7 +4425,7 @@ pub mod tests {
 
         // Reveal concealment at index 0 (simulating cursor on it)
         map.update(cx, |map, cx| {
-            map.update_revealed_indices(vec![0], cx);
+            map.update_revealed_indices(HashSet::from_iter([0]), cx);
         });
 
         let snapshot = map.update(cx, |map, cx| map.snapshot(cx));
@@ -4436,7 +4436,7 @@ pub mod tests {
 
         // Un-reveal (cursor moved away)
         map.update(cx, |map, cx| {
-            map.update_revealed_indices(vec![], cx);
+            map.update_revealed_indices(HashSet::default(), cx);
         });
 
         let snapshot = map.update(cx, |map, cx| map.snapshot(cx));

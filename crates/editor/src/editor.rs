@@ -3794,7 +3794,7 @@ impl Editor {
                     .map(|s| s.head())
                     .collect();
 
-                let revealed_indices: Vec<usize> = map
+                let revealed_indices: HashSet<usize> = map
                     .concealments()
                     .iter()
                     .enumerate()
@@ -21857,11 +21857,8 @@ impl Editor {
             ));
         }
 
-        let visible_text = snapshot
-            .text_for_range(visible_start..visible_end)
-            .collect::<String>();
-        self.collect_rule_concealments(
-            &visible_text,
+        self.collect_rule_concealments_chunked(
+            snapshot.text_for_range(visible_start..visible_end),
             visible_start,
             &snapshot,
             &mut concealments,
@@ -21883,7 +21880,7 @@ impl Editor {
     ) {
         let rules = EditorSettings::get_global(cx).conceal.rules.clone();
         let language_name = self
-            .language_at(MultiBufferOffset(0), cx)
+            .language_at(base_offset, cx)
             .map(|l| l.name().to_string());
 
         for rule in &rules {
@@ -21903,6 +21900,101 @@ impl Editor {
                         gpui::SharedString::from(sub.replacement.clone()),
                     ));
                     search_from = search_from + pos + sub.pattern.len();
+                }
+            }
+        }
+    }
+
+    fn collect_rule_concealments_chunked<'a>(
+        &self,
+        chunks: impl Iterator<Item = &'a str>,
+        base_offset: MultiBufferOffset,
+        snapshot: &multi_buffer::MultiBufferSnapshot,
+        concealments: &mut Vec<(Range<Anchor>, gpui::SharedString)>,
+        cx: &Context<Self>,
+    ) {
+        let rules = EditorSettings::get_global(cx).conceal.rules.clone();
+        let language_name = self
+            .language_at(base_offset, cx)
+            .map(|l| l.name().to_string());
+
+        let max_pattern_len = rules
+            .iter()
+            .flat_map(|r| &r.substitutions)
+            .map(|s| s.pattern.len())
+            .max()
+            .unwrap_or(0);
+
+        if max_pattern_len == 0 {
+            return;
+        }
+
+        // Concatenate chunks with a carry buffer for cross-boundary matches.
+        let carry_len = max_pattern_len - 1;
+        let mut buf = String::new();
+        let mut buf_start_offset = base_offset;
+
+        for chunk in chunks {
+            buf.push_str(chunk);
+
+            let searchable = buf.len().saturating_sub(carry_len);
+            if searchable == 0 {
+                continue;
+            }
+
+            for rule in &rules {
+                if !language_name.as_deref().is_some_and(|n| n == rule.language) {
+                    continue;
+                }
+                for sub in &rule.substitutions {
+                    if sub.pattern.is_empty() {
+                        continue;
+                    }
+                    let mut search_from = 0;
+                    while search_from < searchable {
+                        if let Some(pos) = buf[search_from..].find(sub.pattern.as_str()) {
+                            if search_from + pos + sub.pattern.len() > buf.len() {
+                                break;
+                            }
+                            let start = buf_start_offset + search_from + pos;
+                            let end = start + sub.pattern.len();
+                            concealments.push((
+                                snapshot.anchor_after(start)..snapshot.anchor_before(end),
+                                gpui::SharedString::from(sub.replacement.clone()),
+                            ));
+                            search_from = search_from + pos + sub.pattern.len();
+                        } else {
+                            break;
+                        }
+                    }
+                }
+            }
+
+            let drain_to = searchable;
+            buf_start_offset += drain_to;
+            buf.drain(..drain_to);
+        }
+
+        // Process remaining carry buffer.
+        if !buf.is_empty() {
+            for rule in &rules {
+                if !language_name.as_deref().is_some_and(|n| n == rule.language) {
+                    continue;
+                }
+                for sub in &rule.substitutions {
+                    if sub.pattern.is_empty() {
+                        continue;
+                    }
+                    let mut search_from = 0;
+                    while let Some(pos) = buf[search_from..].find(sub.pattern.as_str()) {
+                        let start = buf_start_offset + search_from + pos;
+                        let end = start + sub.pattern.len();
+                        concealments.push((
+                            snapshot.anchor_after(start)..snapshot.anchor_before(end),
+                            gpui::SharedString::from(sub.replacement.clone()),
+                        ));
+                        search_from = search_from + pos + sub.pattern.len();
+                    }
                 }
             }
         }

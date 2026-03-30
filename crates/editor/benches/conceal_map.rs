@@ -1,3 +1,4 @@
+use collections::HashSet;
 use criterion::{BatchSize, BenchmarkId, Criterion, criterion_group, criterion_main};
 use editor::MultiBuffer;
 use editor::display_map::*;
@@ -168,7 +169,7 @@ fn reveal_sync_bench(c: &mut Criterion) {
 
         // Reveal concealments near the middle — simulates cursor landing on them
         let mid_end = mid + LINE.len();
-        let reveal_indices: Vec<usize> = concealments
+        let reveal_indices: HashSet<usize> = concealments
             .iter()
             .enumerate()
             .filter(|(_, (range, _))| {
