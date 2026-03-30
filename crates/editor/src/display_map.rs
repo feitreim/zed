@@ -1286,11 +1286,7 @@ impl DisplayMap {
         self.block_map.read(snapshot, edits, None);
     }
 
-    pub fn update_revealed_indices(
-        &mut self,
-        indices: Vec<usize>,
-        _cx: &mut Context<Self>,
-    ) {
+    pub fn update_revealed_indices(&mut self, indices: Vec<usize>, _cx: &mut Context<Self>) {
         self.conceal_map.set_revealed_indices(indices);
     }
 

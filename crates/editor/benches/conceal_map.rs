@@ -1,6 +1,6 @@
 use criterion::{BatchSize, BenchmarkId, Criterion, criterion_group, criterion_main};
-use editor::display_map::*;
 use editor::MultiBuffer;
+use editor::display_map::*;
 use gpui::{SharedString, TestDispatcher};
 use multi_buffer::{MultiBufferOffset, ToOffset};
 use rand::{Rng, SeedableRng, rngs::StdRng};

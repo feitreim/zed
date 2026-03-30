@@ -305,7 +305,10 @@ impl ConcealMap {
             passthrough: true,
             version: 0,
         };
-        push_isomorphic(&mut snapshot.transforms, snapshot.fold_snapshot.text_summary());
+        push_isomorphic(
+            &mut snapshot.transforms,
+            snapshot.fold_snapshot.text_summary(),
+        );
         (
             Self {
                 snapshot: snapshot.clone(),
@@ -417,11 +420,9 @@ impl ConcealMap {
                     cursor.next();
                 }
 
-                let old_start =
-                    cursor.start().1 + (affected_range.start.0 - cursor.start().0.0);
+                let old_start = cursor.start().1 + (affected_range.start.0 - cursor.start().0.0);
                 cursor.seek(&affected_range.end, Bias::Right);
-                let old_end =
-                    cursor.start().1 + (affected_range.end.0 - cursor.start().0.0);
+                let old_end = cursor.start().1 + (affected_range.end.0 - cursor.start().0.0);
 
                 let prefix_start = FoldOffset(new_transforms.summary().input.len);
                 if affected_range.start > prefix_start {
@@ -755,11 +756,15 @@ impl ConcealSnapshot {
     }
 
     pub fn line_len(&self, row: u32) -> u32 {
-        let line_start = ConcealPoint::new(row, 0).to_offset(self).0 .0;
+        let line_start = ConcealPoint::new(row, 0).to_offset(self).0.0;
         let line_end = if row >= self.max_point().row() {
-            self.len().0 .0
+            self.len().0.0
         } else {
-            ConcealPoint::new(row + 1, 0).to_offset(self).0 .0.saturating_sub(1)
+            ConcealPoint::new(row + 1, 0)
+                .to_offset(self)
+                .0
+                .0
+                .saturating_sub(1)
         };
         line_end.saturating_sub(line_start) as u32
     }
@@ -989,8 +994,7 @@ impl ConcealChunks<'_> {
     pub(crate) fn seek(&mut self, range: Range<ConcealOffset>) {
         if self.passthrough {
             let fold_end = FoldOffset(range.end.0);
-            self.fold_chunks
-                .seek(FoldOffset(range.start.0)..fold_end);
+            self.fold_chunks.seek(FoldOffset(range.start.0)..fold_end);
             self.output_offset = range.start;
             self.max_output_offset = range.end;
             self.max_fold_offset = fold_end;
@@ -1069,8 +1073,8 @@ impl<'a> Iterator for ConcealChunks<'a> {
             // With language_aware=true, fold chunks are split at syntax token
             // boundaries so a concealment may span multiple chunks (e.g.
             // "not in" → ["not", " ", "in"]). Consume all of them.
-            let mut fold_consumed = conceal_fold_start
-                + highlight_chunk.as_ref().map_or(0, |c| c.text.len());
+            let mut fold_consumed =
+                conceal_fold_start + highlight_chunk.as_ref().map_or(0, |c| c.text.len());
 
             self.fold_chunk = highlight_chunk
                 .as_ref()
@@ -1282,11 +1286,7 @@ mod tests {
     fn setup(
         text: &str,
         cx: &mut gpui::App,
-    ) -> (
-        ConcealMap,
-        FoldSnapshot,
-        multi_buffer::MultiBufferSnapshot,
-    ) {
+    ) -> (ConcealMap, FoldSnapshot, multi_buffer::MultiBufferSnapshot) {
         init_test(cx);
         let buffer = MultiBuffer::build_simple(text, cx);
         let buffer_snapshot = buffer.read(cx).snapshot(cx);
@@ -1621,7 +1621,10 @@ mod tests {
 
         // Point past max_point clips to max_point.
         let past_end = ConcealPoint::new(0, 100);
-        assert_eq!(snapshot.clip_point(past_end, Bias::Left), snapshot.max_point());
+        assert_eq!(
+            snapshot.clip_point(past_end, Bias::Left),
+            snapshot.max_point()
+        );
     }
 
     #[gpui::test]

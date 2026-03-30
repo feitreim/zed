@@ -21813,7 +21813,13 @@ impl Editor {
         }
 
         let text = snapshot.text();
-        self.collect_rule_concealments(&text, MultiBufferOffset(0), &snapshot, &mut concealments, cx);
+        self.collect_rule_concealments(
+            &text,
+            MultiBufferOffset(0),
+            &snapshot,
+            &mut concealments,
+            cx,
+        );
 
         self.display_map.update(cx, |map, cx| {
             map.set_concealments(concealments, cx);
@@ -21854,7 +21860,13 @@ impl Editor {
         let visible_text = snapshot
             .text_for_range(visible_start..visible_end)
             .collect::<String>();
-        self.collect_rule_concealments(&visible_text, visible_start, &snapshot, &mut concealments, cx);
+        self.collect_rule_concealments(
+            &visible_text,
+            visible_start,
+            &snapshot,
+            &mut concealments,
+            cx,
+        );
 
         self.display_map.update(cx, |map, cx| {
             map.set_concealments(concealments, cx);

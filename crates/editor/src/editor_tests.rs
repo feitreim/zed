@@ -35884,8 +35884,9 @@ async fn test_python_concealments_language_aware_chunks(cx: &mut TestAppContext)
     cx.update_editor(|editor, _window, cx| {
         let snapshot = editor.buffer.read(cx).snapshot(cx);
         let len = snapshot.len();
-        let mut ranges: Vec<_> =
-            snapshot.concealed_ranges(MultiBufferOffset(0)..len).collect();
+        let mut ranges: Vec<_> = snapshot
+            .concealed_ranges(MultiBufferOffset(0)..len)
+            .collect();
         ranges.sort_by_key(|(range, _)| range.start);
 
         let concealments: Vec<_> = ranges
