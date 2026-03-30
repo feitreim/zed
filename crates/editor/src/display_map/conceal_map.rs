@@ -22,8 +22,9 @@ pub struct ConcealMap {
     /// Avoids re-converting anchors → fold offsets on every reveal change.
     /// Recomputed when the fold snapshot or concealments change.
     cached_fold_ranges: Vec<Option<Range<FoldOffset>>>,
-    revealed_ranges: Vec<Range<Anchor>>,
-    prev_revealed_ranges: Vec<Range<Anchor>>,
+    /// Indices into `concealments` that are currently revealed (cursor is on them).
+    revealed_indices: Vec<usize>,
+    prev_revealed_indices: Vec<usize>,
 }
 
 #[derive(Clone)]
@@ -310,8 +311,8 @@ impl ConcealMap {
                 snapshot: snapshot.clone(),
                 concealments: Vec::new(),
                 cached_fold_ranges: Vec::new(),
-                revealed_ranges: Vec::new(),
-                prev_revealed_ranges: Vec::new(),
+                revealed_indices: Vec::new(),
+                prev_revealed_indices: Vec::new(),
             },
             snapshot,
         )
@@ -328,7 +329,7 @@ impl ConcealMap {
 
     pub fn sync_fold_snapshot(&mut self, fold_snapshot: FoldSnapshot) {
         self.snapshot.fold_snapshot = fold_snapshot;
-        self.prev_revealed_ranges = self.revealed_ranges.clone();
+        self.prev_revealed_indices = self.revealed_indices.clone();
     }
 
     pub fn set_concealments(
@@ -371,13 +372,13 @@ impl ConcealMap {
         &self.concealments
     }
 
-    pub fn set_revealed_ranges(&mut self, revealed_ranges: Vec<Range<Anchor>>) {
-        std::mem::swap(&mut self.prev_revealed_ranges, &mut self.revealed_ranges);
-        self.revealed_ranges = revealed_ranges;
+    pub fn set_revealed_indices(&mut self, indices: Vec<usize>) {
+        std::mem::swap(&mut self.prev_revealed_indices, &mut self.revealed_indices);
+        self.revealed_indices = indices;
     }
 
     fn sync(&mut self, fold_snapshot: FoldSnapshot, fold_edits: Vec<FoldEdit>) -> Vec<ConcealEdit> {
-        let reveal_changed = self.revealed_ranges != self.prev_revealed_ranges;
+        let reveal_changed = self.revealed_indices != self.prev_revealed_indices;
 
         if fold_edits.is_empty()
             && self.snapshot.fold_snapshot.version == fold_snapshot.version
@@ -392,7 +393,7 @@ impl ConcealMap {
         if fold_edits.is_empty() {
             let affected = self.reveal_affected_ranges();
             if affected.is_empty() {
-                self.prev_revealed_ranges = self.revealed_ranges.clone();
+                self.prev_revealed_indices = self.revealed_indices.clone();
                 return vec![];
             }
 
@@ -489,7 +490,7 @@ impl ConcealMap {
 
             drop(cursor);
             self.snapshot.transforms = new_transforms;
-            self.prev_revealed_ranges = self.revealed_ranges.clone();
+            self.prev_revealed_indices = self.revealed_indices.clone();
             return conceal_edits.into_inner();
         }
 
@@ -594,7 +595,7 @@ impl ConcealMap {
 
         drop(cursor);
         self.snapshot.transforms = new_transforms;
-        self.prev_revealed_ranges = self.revealed_ranges.clone();
+        self.prev_revealed_indices = self.revealed_indices.clone();
         conceal_edits.into_inner()
     }
 
@@ -633,17 +634,14 @@ impl ConcealMap {
     }
 
     fn resolve_concealments(&self) -> Vec<(Range<FoldOffset>, SharedString)> {
-        let buffer = &self.snapshot.fold_snapshot.inlay_snapshot.buffer;
         let mut resolved: Vec<_> = self
             .cached_fold_ranges
             .iter()
             .zip(&self.concealments)
-            .filter_map(|(fold_range, (anchor_range, replacement))| {
+            .enumerate()
+            .filter_map(|(i, (fold_range, (_, replacement)))| {
                 let fold_range = fold_range.as_ref()?;
-                if self.revealed_ranges.iter().any(|revealed| {
-                    anchor_range.start.cmp(&revealed.end, buffer).is_lt()
-                        && anchor_range.end.cmp(&revealed.start, buffer).is_gt()
-                }) {
+                if self.revealed_indices.contains(&i) {
                     return None;
                 }
                 Some((fold_range.clone(), replacement.clone()))
@@ -665,23 +663,14 @@ impl ConcealMap {
         if self.concealments.is_empty() {
             return Vec::new();
         }
-        let buffer = &self.snapshot.fold_snapshot.inlay_snapshot.buffer;
 
         let mut affected = Vec::new();
-        for ((anchor_range, _), fold_range) in
-            self.concealments.iter().zip(&self.cached_fold_ranges)
-        {
+        for (i, fold_range) in self.cached_fold_ranges.iter().enumerate() {
             let Some(fold_range) = fold_range else {
                 continue;
             };
-            let was_revealed = self.prev_revealed_ranges.iter().any(|revealed| {
-                anchor_range.start.cmp(&revealed.end, buffer).is_lt()
-                    && anchor_range.end.cmp(&revealed.start, buffer).is_gt()
-            });
-            let is_revealed = self.revealed_ranges.iter().any(|revealed| {
-                anchor_range.start.cmp(&revealed.end, buffer).is_lt()
-                    && anchor_range.end.cmp(&revealed.start, buffer).is_gt()
-            });
+            let was_revealed = self.prev_revealed_indices.contains(&i);
+            let is_revealed = self.revealed_indices.contains(&i);
             if was_revealed == is_revealed {
                 continue;
             }
@@ -772,7 +761,7 @@ impl ConcealSnapshot {
         } else {
             ConcealPoint::new(row + 1, 0).to_offset(self).0 .0.saturating_sub(1)
         };
-        (line_end - line_start) as u32
+        line_end.saturating_sub(line_start) as u32
     }
 
     pub fn clip_point(&self, point: ConcealPoint, bias: Bias) -> ConcealPoint {
@@ -1319,14 +1308,12 @@ mod tests {
         let (snapshot, _) = conceal_map.set_concealments(concealments);
         assert_eq!(snapshot.text(), "x = 2\nλ x: x + 1\n");
 
-        let revealed =
-            vec![buffer_snapshot.anchor_before(O(6))..buffer_snapshot.anchor_after(O(12))];
-        conceal_map.set_revealed_ranges(revealed);
+        conceal_map.set_revealed_indices(vec![0]);
         let (snapshot, _) = conceal_map.read(fold_snapshot.clone(), vec![]);
         assert_eq!(snapshot.text(), "x = 2\nlambda x: x + 1\n");
 
         // Re-conceal (cursor moved away)
-        conceal_map.set_revealed_ranges(vec![]);
+        conceal_map.set_revealed_indices(vec![]);
         let (snapshot, _) = conceal_map.read(fold_snapshot, vec![]);
         assert_eq!(snapshot.text(), "x = 2\nλ x: x + 1\n");
     }

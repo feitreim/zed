@@ -2,7 +2,7 @@ use criterion::{BatchSize, BenchmarkId, Criterion, criterion_group, criterion_ma
 use editor::display_map::*;
 use editor::MultiBuffer;
 use gpui::{SharedString, TestDispatcher};
-use multi_buffer::MultiBufferOffset;
+use multi_buffer::{MultiBufferOffset, ToOffset};
 use rand::{Rng, SeedableRng, rngs::StdRng};
 use std::hint::black_box;
 use text::Bias;
@@ -166,11 +166,18 @@ fn reveal_sync_bench(c: &mut Criterion) {
         let (_, fold_snapshot) = FoldMap::new(inlay_snapshot);
         let concealments = build_concealments(&text, &buffer_snapshot);
 
-        // Reveal one line in the middle — simulates cursor landing near a concealment
-        let reveal = vec![
-            buffer_snapshot.anchor_before(MultiBufferOffset(mid))
-                ..buffer_snapshot.anchor_after(MultiBufferOffset(mid + LINE.len())),
-        ];
+        // Reveal concealments near the middle — simulates cursor landing on them
+        let mid_end = mid + LINE.len();
+        let reveal_indices: Vec<usize> = concealments
+            .iter()
+            .enumerate()
+            .filter(|(_, (range, _))| {
+                let start = range.start.to_offset(&buffer_snapshot);
+                let end = range.end.to_offset(&buffer_snapshot);
+                end > MultiBufferOffset(mid) && start < MultiBufferOffset(mid_end)
+            })
+            .map(|(i, _)| i)
+            .collect();
 
         group.bench_with_input(
             BenchmarkId::from_parameter(num_lines),
@@ -183,7 +190,7 @@ fn reveal_sync_bench(c: &mut Criterion) {
                         map
                     },
                     |mut map| {
-                        map.set_revealed_ranges(reveal.clone());
+                        map.set_revealed_indices(reveal_indices.clone());
                         black_box(map.read(fold_snapshot.clone(), vec![]))
                     },
                     BatchSize::SmallInput,

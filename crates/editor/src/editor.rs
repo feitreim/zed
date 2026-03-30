@@ -3794,18 +3794,19 @@ impl Editor {
                     .map(|s| s.head())
                     .collect();
 
-                let revealed_ranges: Vec<Range<Anchor>> = map
+                let revealed_indices: Vec<usize> = map
                     .concealments()
                     .iter()
-                    .filter(|(range, _)| {
+                    .enumerate()
+                    .filter(|(_, (range, _))| {
                         let start = range.start.to_offset(buffer);
                         let end = range.end.to_offset(buffer);
                         cursor_offsets.iter().any(|&c| c >= start && c <= end)
                     })
-                    .map(|(range, _)| range.clone())
+                    .map(|(i, _)| i)
                     .collect();
 
-                map.update_revealed_ranges(revealed_ranges, _cx);
+                map.update_revealed_indices(revealed_indices, _cx);
             });
         }
 

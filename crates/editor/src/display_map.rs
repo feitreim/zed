@@ -1286,12 +1286,12 @@ impl DisplayMap {
         self.block_map.read(snapshot, edits, None);
     }
 
-    pub fn update_revealed_ranges(
+    pub fn update_revealed_indices(
         &mut self,
-        ranges: Vec<Range<multi_buffer::Anchor>>,
+        indices: Vec<usize>,
         _cx: &mut Context<Self>,
     ) {
-        self.conceal_map.set_revealed_ranges(ranges);
+        self.conceal_map.set_revealed_indices(indices);
     }
 
     pub fn concealments(&self) -> &[(Range<multi_buffer::Anchor>, gpui::SharedString)] {
@@ -4376,9 +4376,9 @@ pub mod tests {
             "λ x: x + 1\n",
         );
 
-        // Reveal
+        // Reveal concealment at index 0
         map.update(cx, |map, cx| {
-            map.update_revealed_ranges(vec![start..end], cx);
+            map.update_revealed_indices(vec![0], cx);
         });
 
         let snapshot = map.update(cx, |map, cx| map.snapshot(cx));
@@ -4427,9 +4427,9 @@ pub mod tests {
             "x = 2\nλ x: x + 1\n",
         );
 
-        // Reveal the lambda range (simulating cursor on it)
+        // Reveal concealment at index 0 (simulating cursor on it)
         map.update(cx, |map, cx| {
-            map.update_revealed_ranges(vec![start..end], cx);
+            map.update_revealed_indices(vec![0], cx);
         });
 
         let snapshot = map.update(cx, |map, cx| map.snapshot(cx));
@@ -4440,7 +4440,7 @@ pub mod tests {
 
         // Un-reveal (cursor moved away)
         map.update(cx, |map, cx| {
-            map.update_revealed_ranges(vec![], cx);
+            map.update_revealed_indices(vec![], cx);
         });
 
         let snapshot = map.update(cx, |map, cx| map.snapshot(cx));
