@@ -225,9 +225,6 @@ pub struct ConcealChunks<'a> {
     fold_offset: FoldOffset,
     output_offset: ConcealOffset,
     max_output_offset: ConcealOffset,
-    /// Fold-space end of the entire requested range. Used to give fold_chunks
-    /// a wide range on concealment seeks so it stays positioned for the next
-    /// isomorphic region without a second seek.
     max_fold_offset: FoldOffset,
 }
 
@@ -848,23 +845,6 @@ impl ConcealSnapshot {
             transform_cursor.start().1 + overshoot
         };
 
-        let transform_end = transform_cursor.end();
-
-        let fold_end = if transform_cursor
-            .item()
-            .is_none_or(|transform| transform.is_concealment())
-        {
-            fold_start
-        } else if range.end < transform_end.0 {
-            let overshoot = range.end - transform_cursor.start().0;
-            transform_cursor.start().1 + overshoot
-        } else {
-            transform_end.1
-        };
-
-        // Compute the fold-space end for the entire range. Used to give
-        // fold_chunks a wide range on concealment seeks so that it stays
-        // positioned for the next isomorphic region without a second seek.
         let max_fold_offset = {
             let mut end_cursor = self
                 .transforms
@@ -887,7 +867,7 @@ impl ConcealSnapshot {
             transforms: &self.transforms,
             transform_cursor,
             fold_chunks: self.fold_snapshot.chunks(
-                fold_start..fold_end,
+                fold_start..max_fold_offset,
                 language_aware,
                 highlights,
             ),
@@ -979,27 +959,6 @@ impl ConcealChunks<'_> {
             self.transform_cursor.start().1 + overshoot
         };
 
-        let transform_end = self.transform_cursor.end();
-
-        let fold_end = if self
-            .transform_cursor
-            .item()
-            .is_none_or(|transform| transform.is_concealment())
-        {
-            fold_start
-        } else if range.end < transform_end.0 {
-            let overshoot = range.end - self.transform_cursor.start().0;
-            self.transform_cursor.start().1 + overshoot
-        } else {
-            transform_end.1
-        };
-
-        self.fold_chunks.seek(fold_start..fold_end);
-        self.fold_chunk = None;
-        self.fold_offset = fold_start;
-        self.output_offset = range.start;
-        self.max_output_offset = range.end;
-
         let mut end_cursor = self
             .transforms
             .cursor::<Dimensions<ConcealOffset, FoldOffset>>(());
@@ -1014,6 +973,15 @@ impl ConcealChunks<'_> {
         } else {
             FoldOffset(self.transforms.summary().input.len)
         };
+
+        // Seek fold_chunks to the full range upfront so the iterator can
+        // advance through concealments without expensive per-concealment
+        // re-seeks that cascade through all underlying map layers.
+        self.fold_chunks.seek(fold_start..self.max_fold_offset);
+        self.fold_chunk = None;
+        self.fold_offset = fold_start;
+        self.output_offset = range.start;
+        self.max_output_offset = range.end;
     }
 }
 
@@ -1034,22 +1002,29 @@ impl<'a> Iterator for ConcealChunks<'a> {
         if let Some(replacement) = transform.replacement_text() {
             let text = replacement.as_ref();
 
-            let conceal_fold_start = self.transform_cursor.start().1;
             let conceal_fold_end = self.transform_cursor.end().1;
-            self.fold_chunks
-                .seek(conceal_fold_start..self.max_fold_offset);
-            let highlight_chunk = self.fold_chunks.next();
+
+            // Grab the fold chunk at the current position for syntax
+            // highlighting. The fold iterator is already positioned here
+            // from the initial wide-range seek, so no re-seek needed.
+            if self.fold_chunk.is_none() {
+                let offset = self.fold_offset;
+                self.fold_chunk = self.fold_chunks.next().map(|c| (offset, c));
+            }
+            let highlight_chunk = self.fold_chunk.as_ref().map(|(_, c)| c.clone());
 
             // With language_aware=true, fold chunks are split at syntax token
             // boundaries so a concealment may span multiple chunks (e.g.
             // "not in" → ["not", " ", "in"]). Consume all of them.
-            let mut fold_consumed =
-                conceal_fold_start + highlight_chunk.as_ref().map_or(0, |c| c.text.len());
-
-            self.fold_chunk = highlight_chunk
+            let mut fold_consumed = self
+                .fold_chunk
                 .as_ref()
-                .filter(|c| conceal_fold_start + c.text.len() > conceal_fold_end)
-                .map(|c| (conceal_fold_start, c.clone()));
+                .map_or(self.fold_offset, |(start, c)| *start + c.text.len());
+
+            self.fold_chunk = self
+                .fold_chunk
+                .take()
+                .filter(|(start, c)| *start + c.text.len() > conceal_fold_end);
 
             while fold_consumed < conceal_fold_end {
                 let chunk_fold_start = fold_consumed;
