@@ -1004,14 +1004,22 @@ impl<'a> Iterator for ConcealChunks<'a> {
 
             let conceal_fold_end = self.transform_cursor.end().1;
 
-            // Grab the fold chunk at the current position for syntax
-            // highlighting. The fold iterator is already positioned here
-            // from the initial wide-range seek, so no re-seek needed.
+            // Grab highlight info from the fold chunk at the current
+            // position. Only the scalar style fields are needed — no
+            // need to clone the whole Chunk.
             if self.fold_chunk.is_none() {
                 let offset = self.fold_offset;
                 self.fold_chunk = self.fold_chunks.next().map(|c| (offset, c));
             }
-            let highlight_chunk = self.fold_chunk.as_ref().map(|(_, c)| c.clone());
+            let highlight = self.fold_chunk.as_ref().map(|(_, c)| {
+                (
+                    c.syntax_highlight_id,
+                    c.highlight_style,
+                    c.diagnostic_severity,
+                    c.is_unnecessary,
+                    c.underline,
+                )
+            });
 
             // With language_aware=true, fold chunks are split at syntax token
             // boundaries so a concealment may span multiple chunks (e.g.
@@ -1045,22 +1053,24 @@ impl<'a> Iterator for ConcealChunks<'a> {
             self.output_offset.0 += text.len();
             self.transform_cursor.next();
 
-            return Some(if let Some(source) = highlight_chunk {
-                Chunk {
-                    text,
-                    syntax_highlight_id: source.syntax_highlight_id,
-                    highlight_style: source.highlight_style,
-                    diagnostic_severity: source.diagnostic_severity,
-                    is_unnecessary: source.is_unnecessary,
-                    underline: source.underline,
-                    ..Default::default()
-                }
-            } else {
-                Chunk {
-                    text,
-                    ..Default::default()
-                }
-            });
+            return Some(
+                if let Some((syn_id, hl_style, diag, unnecessary, underline)) = highlight {
+                    Chunk {
+                        text,
+                        syntax_highlight_id: syn_id,
+                        highlight_style: hl_style,
+                        diagnostic_severity: diag,
+                        is_unnecessary: unnecessary,
+                        underline,
+                        ..Default::default()
+                    }
+                } else {
+                    Chunk {
+                        text,
+                        ..Default::default()
+                    }
+                },
+            );
         }
 
         if self.fold_chunk.is_none() {
@@ -1068,27 +1078,40 @@ impl<'a> Iterator for ConcealChunks<'a> {
             self.fold_chunk = self.fold_chunks.next().map(|chunk| (chunk_offset, chunk));
         }
 
-        let (chunk_start, chunk) = self.fold_chunk.clone()?;
-        let chunk_end = chunk_start + chunk.text.len();
+        // Borrow the buffered chunk to extract all Copy fields, avoiding
+        // a clone of the full Chunk (which includes an Arc in renderer).
+        let (chunk_start, chunk) = self.fold_chunk.as_ref()?;
+        let chunk_start = *chunk_start;
+        let chunk_text = chunk.text;
+        let chunk_end = chunk_start + chunk_text.len();
         let transform_end = self.transform_cursor.end().1;
         let end = chunk_end.min(transform_end);
 
         let bit_start = self.fold_offset - chunk_start;
         let bit_end = end - chunk_start;
-        let text = &chunk.text[bit_start..bit_end];
+        let text = &chunk_text[bit_start..bit_end];
         let mask = 1u128
             .unbounded_shl((bit_end - bit_start) as u32)
             .wrapping_sub(1);
         let tabs = (chunk.tabs >> bit_start) & mask;
         let chars = (chunk.chars >> bit_start) & mask;
         let newlines = (chunk.newlines >> bit_start) & mask;
+        let syntax_highlight_id = chunk.syntax_highlight_id;
+        let highlight_style = chunk.highlight_style;
+        let diagnostic_severity = chunk.diagnostic_severity;
+        let is_unnecessary = chunk.is_unnecessary;
+        let is_tab = chunk.is_tab;
+        let is_inlay = chunk.is_inlay;
+        let underline = chunk.underline;
 
         if end == transform_end {
             self.transform_cursor.next();
         }
-        if end == chunk_end {
-            self.fold_chunk.take();
-        }
+        let renderer = if end == chunk_end {
+            self.fold_chunk.take().and_then(|(_, c)| c.renderer)
+        } else {
+            self.fold_chunk.as_ref().and_then(|(_, c)| c.renderer.clone())
+        };
 
         self.fold_offset = end;
         self.output_offset.0 += text.len();
@@ -1104,14 +1127,14 @@ impl<'a> Iterator for ConcealChunks<'a> {
             tabs,
             chars,
             newlines,
-            syntax_highlight_id: chunk.syntax_highlight_id,
-            highlight_style: chunk.highlight_style,
-            diagnostic_severity: chunk.diagnostic_severity,
-            is_unnecessary: chunk.is_unnecessary,
-            is_tab: chunk.is_tab,
-            is_inlay: chunk.is_inlay,
-            underline: chunk.underline,
-            renderer: chunk.renderer,
+            syntax_highlight_id,
+            highlight_style,
+            diagnostic_severity,
+            is_unnecessary,
+            is_tab,
+            is_inlay,
+            underline,
+            renderer,
         })
     }
 }
