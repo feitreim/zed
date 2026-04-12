@@ -794,6 +794,10 @@ impl PickerDelegate for TabSwitcherDelegate {
                 })
                 .ok();
         }
+
+        self.tab_switcher
+            .update(cx, |_, cx| cx.emit(DismissEvent))
+            .log_err();
     }
 
     fn dismissed(&mut self, window: &mut Window, cx: &mut Context<Picker<TabSwitcherDelegate>>) {
