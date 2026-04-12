@@ -149,6 +149,56 @@ async fn test_open_item_on_modifiers_release(cx: &mut gpui::TestAppContext) {
 }
 
 #[gpui::test]
+async fn test_confirm_dismisses_modal_and_focuses_item(cx: &mut gpui::TestAppContext) {
+    let app_state = init_test(cx);
+
+    app_state
+        .fs
+        .as_fake()
+        .insert_tree(
+            path!("/root"),
+            json!({
+                "1.txt": "First file",
+                "2.txt": "Second file",
+            }),
+        )
+        .await;
+
+    let project = Project::test(app_state.fs.clone(), [path!("/root").as_ref()], cx).await;
+    let (multi_workspace, cx) =
+        cx.add_window_view(|window, cx| MultiWorkspace::test_new(project.clone(), window, cx));
+    let workspace = multi_workspace.read_with(cx, |mw, _| mw.workspace().clone());
+
+    open_buffer("1.txt", &workspace, cx).await;
+    open_buffer("2.txt", &workspace, cx).await;
+
+    let tab_switcher = open_tab_switcher(false, &workspace, cx);
+    tab_switcher.update(cx, |picker, _| {
+        assert_eq!(picker.delegate.selected_index(), 1);
+    });
+
+    cx.dispatch_action(menu::Confirm);
+    cx.run_until_parked();
+
+    assert_tab_switcher_is_closed(workspace.clone(), cx);
+    workspace.update_in(cx, |workspace, window, cx| {
+        assert!(
+            !workspace.has_active_modal(window, cx),
+            "no modal should be active after confirm"
+        );
+        let active_editor = workspace.active_item_as::<Editor>(cx).unwrap();
+        assert_eq!(active_editor.read(cx).title(cx), "1.txt");
+        assert!(
+            workspace
+                .active_pane()
+                .focus_handle(cx)
+                .contains_focused(window, cx),
+            "active pane should have focus after confirm"
+        );
+    });
+}
+
+#[gpui::test]
 async fn test_open_on_empty_pane(cx: &mut gpui::TestAppContext) {
     let app_state = init_test(cx);
     app_state.fs.as_fake().insert_tree("/root", json!({})).await;
