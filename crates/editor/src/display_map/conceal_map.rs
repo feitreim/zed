@@ -894,7 +894,7 @@ impl ConcealSnapshot {
         let start_offset = range.start.to_offset(self);
         let end_offset = range.end.to_offset(self);
         let mut summary = MBTextSummary::default();
-        for chunk in self.chunks(start_offset..end_offset, false, Highlights::default()) {
+        for chunk in self.chunks(start_offset..end_offset, LanguageAwareStyling { tree_sitter: false, diagnostics: false }, Highlights::default()) {
             summary += MBTextSummary::from(chunk.text);
         }
         summary
@@ -1668,13 +1668,13 @@ mod tests {
 
         // Seek to an offset past the first concealment and collect the rest.
         let mid = ConcealOffset(O("hello ≠ wor".len()));
-        let chunks = snapshot.chunks(mid..snapshot.len(), false, Highlights::default());
+        let chunks = snapshot.chunks(mid..snapshot.len(), LanguageAwareStyling { tree_sitter: false, diagnostics: false }, Highlights::default());
         let after_seek: String = chunks.map(|c| c.text.to_string()).collect();
         assert_eq!(after_seek, "ld ≡ end");
 
         // Seek again to the second concealment.
         let mid2 = ConcealOffset(O("hello ≠ world ".len()));
-        let chunks = snapshot.chunks(mid2..snapshot.len(), false, Highlights::default());
+        let chunks = snapshot.chunks(mid2..snapshot.len(), LanguageAwareStyling { tree_sitter: false, diagnostics: false }, Highlights::default());
         let after_seek2: String = chunks.map(|c| c.text.to_string()).collect();
         assert_eq!(after_seek2, "≡ end");
     }

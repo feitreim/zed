@@ -35910,7 +35910,7 @@ async fn test_python_concealments_language_aware_chunks(cx: &mut TestAppContext)
         let mut text_from_chunks = String::new();
         for chunk in display_snapshot.chunks(
             DisplayRow(0)..max_row.next_row(),
-            true,
+            LanguageAwareStyling{ tree_sitter: true, diagnostics: true },
             display_map::HighlightStyles::default(),
         ) {
             text_from_chunks.push_str(chunk.text);
