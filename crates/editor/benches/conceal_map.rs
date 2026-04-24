@@ -119,30 +119,28 @@ fn chunk_iteration_bench(c: &mut Criterion) {
     let cx = gpui::TestAppContext::build(dispatcher, None);
     let mut group = c.benchmark_group("conceal/chunks");
 
-    for num_lines in [100, 1_000, 10_000] {
-        let text = LINE.repeat(num_lines);
-        let buffer = cx.update(|cx| MultiBuffer::build_simple(&text, cx));
-        let buffer_snapshot = cx.read(|cx| buffer.read(cx).snapshot(cx));
-        let (_, inlay_snapshot) = InlayMap::new(buffer_snapshot.clone());
-        let (_, fold_snapshot) = FoldMap::new(inlay_snapshot);
+    const NUM_LINES: usize = 10_000;
+    let text = LINE.repeat(NUM_LINES);
+    let buffer = cx.update(|cx| MultiBuffer::build_simple(&text, cx));
+    let buffer_snapshot = cx.read(|cx| buffer.read(cx).snapshot(cx));
+    let (_, inlay_snapshot) = InlayMap::new(buffer_snapshot.clone());
+    let (_, fold_snapshot) = FoldMap::new(inlay_snapshot);
+    let all_concealments = build_concealments(&text, &buffer_snapshot);
 
-        let (_, passthrough) = ConcealMap::new(fold_snapshot.clone());
-        group.bench_with_input(
-            BenchmarkId::new("passthrough", num_lines),
-            &num_lines,
-            |bench, _| {
-                bench.iter(|| {
-                    black_box(passthrough.chars_at(ConcealPoint::new(0, 0)).count());
-                });
-            },
-        );
+    let (_, passthrough) = ConcealMap::new(fold_snapshot.clone());
+    group.bench_function("passthrough", |bench| {
+        bench.iter(|| {
+            black_box(passthrough.chars_at(ConcealPoint::new(0, 0)).count());
+        });
+    });
 
-        let concealments = build_concealments(&text, &buffer_snapshot);
+    for count in [10, 100, 1_000, 10_000] {
+        let concealments: Vec<_> = all_concealments.iter().take(count).cloned().collect();
         let (mut map, _) = ConcealMap::new(fold_snapshot.clone());
         let (active, _) = map.set_concealments(concealments);
         group.bench_with_input(
-            BenchmarkId::new("active", num_lines),
-            &num_lines,
+            BenchmarkId::new("active", count),
+            &count,
             |bench, _| {
                 bench.iter(|| {
                     black_box(active.chars_at(ConcealPoint::new(0, 0)).count());
