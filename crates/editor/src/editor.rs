@@ -1209,6 +1209,7 @@ pub struct Editor {
     needs_initial_data_update: bool,
     enable_runnables: bool,
     enable_mouse_wheel_zoom: bool,
+    concealed: bool,
     show_line_numbers: Option<bool>,
     use_relative_line_numbers: Option<bool>,
     show_git_diff_gutter: Option<bool>,
@@ -2479,6 +2480,7 @@ impl Editor {
             offset_content: !matches!(mode, EditorMode::SingleLine),
             show_breadcrumbs: EditorSettings::get_global(cx).toolbar.breadcrumbs,
             show_gutter: full_mode,
+            concealed: false,
             show_line_numbers: (!full_mode).then_some(false),
             use_relative_line_numbers: None,
             disable_expand_excerpt_buttons: !full_mode,
@@ -3856,6 +3858,31 @@ impl Editor {
             if self.git_blame_inline_enabled {
                 self.start_inline_blame_timer(window, cx);
             }
+        }
+
+        if local && self.concealed {
+            self.display_map.update(cx, |map, _cx| {
+                let cursor_offsets: Vec<MultiBufferOffset> = self
+                    .selections
+                    .all::<MultiBufferOffset>(&display_map)
+                    .iter()
+                    .map(|s| s.head())
+                    .collect();
+
+                let revealed_indices: HashSet<usize> = map
+                    .concealments()
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, (range, _))| {
+                        let start = range.start.to_offset(buffer);
+                        let end = range.end.to_offset(buffer);
+                        cursor_offsets.iter().any(|&c| c >= start && c <= end)
+                    })
+                    .map(|(i, _)| i)
+                    .collect();
+
+                map.update_revealed_indices(revealed_indices, _cx);
+            });
         }
 
         self.blink_manager.update(cx, BlinkManager::pause_blinking);
@@ -22340,6 +22367,218 @@ impl Editor {
             .contains(&buffer_id)
     }
 
+    pub fn toggle_conceal(&mut self, _: &ToggleConceal, _: &mut Window, cx: &mut Context<Self>) {
+        self.concealed = !self.concealed;
+        self.refresh_concealments(cx);
+    }
+
+    fn refresh_concealments(&mut self, cx: &mut Context<Self>) {
+        if !self.concealed {
+            self.display_map.update(cx, |map, cx| {
+                map.set_concealments(vec![], cx);
+            });
+            return;
+        }
+
+        let snapshot = self.buffer.read(cx).snapshot(cx);
+        let buffer_len = snapshot.len();
+        let mut concealments = Vec::new();
+
+        for (range, replacement) in snapshot.concealed_ranges(MultiBufferOffset(0)..buffer_len) {
+            concealments.push((
+                snapshot.anchor_after(range.start)..snapshot.anchor_before(range.end),
+                replacement,
+            ));
+        }
+
+        let text = snapshot.text();
+        self.collect_rule_concealments(
+            &text,
+            MultiBufferOffset(0),
+            &snapshot,
+            &mut concealments,
+            cx,
+        );
+
+        self.display_map.update(cx, |map, cx| {
+            map.set_concealments(concealments, cx);
+        });
+    }
+
+    fn refresh_concealments_visible(&mut self, cx: &mut Context<Self>) {
+        if !self.concealed {
+            return;
+        }
+
+        let display_snapshot = self.display_map.update(cx, |map, cx| map.snapshot(cx));
+        let visible_range = self.multi_buffer_visible_range(&display_snapshot, cx);
+        let snapshot = self.buffer.read(cx).snapshot(cx);
+
+        let visible_start = snapshot.point_to_offset(visible_range.start);
+        let visible_end = snapshot.point_to_offset(visible_range.end);
+
+        let mut concealments: Vec<(Range<Anchor>, gpui::SharedString)> =
+            self.display_map.update(cx, |map, _cx| {
+                map.concealments()
+                    .iter()
+                    .filter(|(range, _)| {
+                        let start = range.start.to_offset(&snapshot);
+                        start < visible_start || start >= visible_end
+                    })
+                    .cloned()
+                    .collect()
+            });
+
+        for (range, replacement) in snapshot.concealed_ranges(visible_start..visible_end) {
+            concealments.push((
+                snapshot.anchor_after(range.start)..snapshot.anchor_before(range.end),
+                replacement,
+            ));
+        }
+
+        self.collect_rule_concealments_chunked(
+            snapshot.text_for_range(visible_start..visible_end),
+            visible_start,
+            &snapshot,
+            &mut concealments,
+            cx,
+        );
+
+        self.display_map.update(cx, |map, cx| {
+            map.set_concealments(concealments, cx);
+        });
+    }
+
+    fn collect_rule_concealments(
+        &self,
+        text: &str,
+        base_offset: MultiBufferOffset,
+        snapshot: &multi_buffer::MultiBufferSnapshot,
+        concealments: &mut Vec<(Range<Anchor>, gpui::SharedString)>,
+        cx: &Context<Self>,
+    ) {
+        let rules = EditorSettings::get_global(cx).conceal.rules.clone();
+        let language_name = self
+            .language_at(base_offset, cx)
+            .map(|l| l.name().to_string());
+
+        for rule in &rules {
+            if !language_name.as_deref().is_some_and(|n| n == rule.language) {
+                continue;
+            }
+            for sub in &rule.substitutions {
+                if sub.pattern.is_empty() {
+                    continue;
+                }
+                let mut search_from = 0;
+                while let Some(pos) = text[search_from..].find(sub.pattern.as_str()) {
+                    let start = base_offset + search_from + pos;
+                    let end = start + sub.pattern.len();
+                    concealments.push((
+                        snapshot.anchor_after(start)..snapshot.anchor_before(end),
+                        gpui::SharedString::from(sub.replacement.clone()),
+                    ));
+                    search_from = search_from + pos + sub.pattern.len();
+                }
+            }
+        }
+    }
+
+    fn collect_rule_concealments_chunked<'a>(
+        &self,
+        chunks: impl Iterator<Item = &'a str>,
+        base_offset: MultiBufferOffset,
+        snapshot: &multi_buffer::MultiBufferSnapshot,
+        concealments: &mut Vec<(Range<Anchor>, gpui::SharedString)>,
+        cx: &Context<Self>,
+    ) {
+        let rules = EditorSettings::get_global(cx).conceal.rules.clone();
+        let language_name = self
+            .language_at(base_offset, cx)
+            .map(|l| l.name().to_string());
+
+        let max_pattern_len = rules
+            .iter()
+            .flat_map(|r| &r.substitutions)
+            .map(|s| s.pattern.len())
+            .max()
+            .unwrap_or(0);
+
+        if max_pattern_len == 0 {
+            return;
+        }
+
+        // Concatenate chunks with a carry buffer for cross-boundary matches.
+        let carry_len = max_pattern_len - 1;
+        let mut buf = String::new();
+        let mut buf_start_offset = base_offset;
+
+        for chunk in chunks {
+            buf.push_str(chunk);
+
+            let searchable = buf.len().saturating_sub(carry_len);
+            if searchable == 0 {
+                continue;
+            }
+
+            for rule in &rules {
+                if !language_name.as_deref().is_some_and(|n| n == rule.language) {
+                    continue;
+                }
+                for sub in &rule.substitutions {
+                    if sub.pattern.is_empty() {
+                        continue;
+                    }
+                    let mut search_from = 0;
+                    while search_from < searchable {
+                        if let Some(pos) = buf[search_from..].find(sub.pattern.as_str()) {
+                            if search_from + pos + sub.pattern.len() > buf.len() {
+                                break;
+                            }
+                            let start = buf_start_offset + search_from + pos;
+                            let end = start + sub.pattern.len();
+                            concealments.push((
+                                snapshot.anchor_after(start)..snapshot.anchor_before(end),
+                                gpui::SharedString::from(sub.replacement.clone()),
+                            ));
+                            search_from = search_from + pos + sub.pattern.len();
+                        } else {
+                            break;
+                        }
+                    }
+                }
+            }
+
+            let drain_to = searchable;
+            buf_start_offset += drain_to;
+            buf.drain(..drain_to);
+        }
+
+        // Process remaining carry buffer.
+        if !buf.is_empty() {
+            for rule in &rules {
+                if !language_name.as_deref().is_some_and(|n| n == rule.language) {
+                    continue;
+                }
+                for sub in &rule.substitutions {
+                    if sub.pattern.is_empty() {
+                        continue;
+                    }
+                    let mut search_from = 0;
+                    while let Some(pos) = buf[search_from..].find(sub.pattern.as_str()) {
+                        let start = buf_start_offset + search_from + pos;
+                        let end = start + sub.pattern.len();
+                        concealments.push((
+                            snapshot.anchor_after(start)..snapshot.anchor_before(end),
+                            gpui::SharedString::from(sub.replacement.clone()),
+                        ));
+                        search_from = search_from + pos + sub.pattern.len();
+                    }
+                }
+            }
+        }
+    }
+
     pub fn toggle_line_numbers(
         &mut self,
         _: &ToggleLineNumbers,
@@ -25104,6 +25343,13 @@ impl Editor {
                     }
                 }
 
+                // When there's no grammar, Reparsed events won't fire, so refresh
+                // settings-based concealments on edit — scoped to the visible range
+                // to avoid a full-buffer scan on every keystroke.
+                if self.concealed && self.language_at(MultiBufferOffset(0), cx).is_none() {
+                    self.refresh_concealments_visible(cx);
+                }
+
                 cx.emit(EditorEvent::BufferEdited);
                 cx.emit(SearchEvent::MatchesInvalidated);
 
@@ -25189,6 +25435,7 @@ impl Editor {
                 self.refresh_runnables(Some(*buffer_id), window, cx);
                 self.refresh_selected_text_highlights(&self.display_snapshot(cx), true, window, cx);
                 self.colorize_brackets(true, cx);
+                self.refresh_concealments_visible(cx);
                 jsx_tag_auto_close::refresh_enabled_in_any_buffer(self, multibuffer, cx);
 
                 cx.emit(EditorEvent::Reparsed(*buffer_id));

@@ -882,8 +882,9 @@ impl BlockMap {
         let mut edits = edits.into_iter().peekable();
 
         let mut inlay_point_cursor = wrap_snapshot.inlay_point_cursor();
-        let mut tab_point_cursor = wrap_snapshot.tab_point_cursor();
         let mut fold_point_cursor = wrap_snapshot.fold_point_cursor();
+        let mut conceal_point_cursor = wrap_snapshot.conceal_point_cursor();
+        let mut tab_point_cursor = wrap_snapshot.tab_point_cursor();
         let mut wrap_point_cursor = wrap_snapshot.wrap_point_cursor();
 
         while let Some(edit) = edits.next() {
@@ -1048,11 +1049,10 @@ impl BlockMap {
                 (start_bound, end_bound),
                 |point, bias| {
                     wrap_point_cursor
-                        .map(
-                            tab_point_cursor.map(
-                                fold_point_cursor.map(inlay_point_cursor.map(point, bias), bias),
-                            ),
-                        )
+                        .map(tab_point_cursor.map(conceal_point_cursor.map(
+                            fold_point_cursor.map(inlay_point_cursor.map(point, bias), bias),
+                            bias,
+                        )))
                         .row()
                 },
             ));
@@ -1275,14 +1275,16 @@ impl BlockMap {
 
         let mut our_inlay_point_cursor = wrap_snapshot.inlay_point_cursor();
         let mut our_fold_point_cursor = wrap_snapshot.fold_point_cursor();
+        let mut our_conceal_point_cursor = wrap_snapshot.conceal_point_cursor();
         let mut our_tab_point_cursor = wrap_snapshot.tab_point_cursor();
         let mut our_wrap_point_cursor = wrap_snapshot.wrap_point_cursor();
 
         let mut our_wrapper = |our_point: Point, bias: Bias| {
             our_wrap_point_cursor
-                .map(our_tab_point_cursor.map(
+                .map(our_tab_point_cursor.map(our_conceal_point_cursor.map(
                     our_fold_point_cursor.map(our_inlay_point_cursor.map(our_point, bias), bias),
-                ))
+                    bias,
+                )))
                 .row()
         };
         let mut companion_wrapper = |their_point: Point, bias: Bias| {
@@ -1292,7 +1294,8 @@ impl BlockMap {
                 .inlay_point_cursor()
                 .map(their_point, bias);
             let fold_point = companion_snapshot.to_fold_point(inlay_point, bias);
-            let tab_point = companion_snapshot.fold_point_to_tab_point(fold_point);
+            let conceal_point = companion_snapshot.to_conceal_point(fold_point, bias);
+            let tab_point = companion_snapshot.conceal_point_to_tab_point(conceal_point);
             companion_snapshot.tab_point_to_wrap_point(tab_point).row()
         };
         fn determine_spacer(
@@ -2868,7 +2871,8 @@ mod tests {
     use super::*;
     use crate::{
         display_map::{
-            Companion, fold_map::FoldMap, inlay_map::InlayMap, tab_map::TabMap, wrap_map::WrapMap,
+            Companion, conceal_map::ConcealMap, fold_map::FoldMap, inlay_map::InlayMap,
+            tab_map::TabMap, wrap_map::WrapMap,
         },
         test::test_font,
     };
@@ -2919,7 +2923,8 @@ mod tests {
         let subscription = buffer.update(cx, |buffer, _| buffer.subscribe());
         let (mut inlay_map, inlay_snapshot) = InlayMap::new(buffer_snapshot.clone());
         let (mut fold_map, fold_snapshot) = FoldMap::new(inlay_snapshot);
-        let (mut tab_map, tab_snapshot) = TabMap::new(fold_snapshot, 1.try_into().unwrap());
+        let (mut conceal_map, conceal_snapshot) = ConcealMap::new(fold_snapshot);
+        let (mut tab_map, tab_snapshot) = TabMap::new(conceal_snapshot, 1.try_into().unwrap());
         let (wrap_map, wraps_snapshot) =
             cx.update(|cx| WrapMap::new(tab_snapshot, font("Helvetica"), px(14.0), None, cx));
         let mut block_map = BlockMap::new(wraps_snapshot.clone(), 1, 1);
@@ -3069,8 +3074,9 @@ mod tests {
         let (inlay_snapshot, inlay_edits) =
             inlay_map.sync(buffer_snapshot, subscription.consume().into_inner());
         let (fold_snapshot, fold_edits) = fold_map.read(inlay_snapshot, inlay_edits);
+        let (conceal_snapshot, conceal_edits) = conceal_map.read(fold_snapshot, fold_edits);
         let (tab_snapshot, tab_edits) =
-            tab_map.sync(fold_snapshot, fold_edits, 4.try_into().unwrap());
+            tab_map.sync(conceal_snapshot, conceal_edits, 4.try_into().unwrap());
         let (wraps_snapshot, wrap_edits) = wrap_map.update(cx, |wrap_map, cx| {
             wrap_map.sync(tab_snapshot, tab_edits, cx)
         });
@@ -3134,7 +3140,8 @@ mod tests {
         let multi_buffer_snapshot = multi_buffer.read(cx).snapshot(cx);
         let (_, inlay_snapshot) = InlayMap::new(multi_buffer_snapshot);
         let (_, fold_snapshot) = FoldMap::new(inlay_snapshot);
-        let (_, tab_snapshot) = TabMap::new(fold_snapshot, 4.try_into().unwrap());
+        let (_, conceal_snapshot) = ConcealMap::new(fold_snapshot);
+        let (_, tab_snapshot) = TabMap::new(conceal_snapshot, 4.try_into().unwrap());
         let (_, wraps_snapshot) = WrapMap::new(tab_snapshot, font, font_size, Some(wrap_width), cx);
 
         let block_map = BlockMap::new(wraps_snapshot.clone(), 1, 1);
@@ -3168,7 +3175,8 @@ mod tests {
         let _subscription = buffer.update(cx, |buffer, _| buffer.subscribe());
         let (_inlay_map, inlay_snapshot) = InlayMap::new(buffer_snapshot.clone());
         let (_fold_map, fold_snapshot) = FoldMap::new(inlay_snapshot);
-        let (_tab_map, tab_snapshot) = TabMap::new(fold_snapshot, 1.try_into().unwrap());
+        let (_conceal_map, conceal_snapshot) = ConcealMap::new(fold_snapshot);
+        let (_tab_map, tab_snapshot) = TabMap::new(conceal_snapshot, 1.try_into().unwrap());
         let (_wrap_map, wraps_snapshot) =
             cx.update(|cx| WrapMap::new(tab_snapshot, font("Helvetica"), px(14.0), None, cx));
         let mut block_map = BlockMap::new(wraps_snapshot.clone(), 1, 1);
@@ -3272,7 +3280,8 @@ mod tests {
         let buffer_snapshot = cx.update(|cx| buffer.read(cx).snapshot(cx));
         let (_, inlay_snapshot) = InlayMap::new(buffer_snapshot.clone());
         let (_, fold_snapshot) = FoldMap::new(inlay_snapshot);
-        let (_, tab_snapshot) = TabMap::new(fold_snapshot, 4.try_into().unwrap());
+        let (_, conceal_snapshot) = ConcealMap::new(fold_snapshot);
+        let (_, tab_snapshot) = TabMap::new(conceal_snapshot, 4.try_into().unwrap());
         let (_, wraps_snapshot) = cx.update(|cx| {
             WrapMap::new(tab_snapshot, font("Helvetica"), px(14.0), Some(px(90.)), cx)
         });
@@ -3316,8 +3325,9 @@ mod tests {
         let buffer_snapshot = cx.update(|cx| buffer.read(cx).snapshot(cx));
         let (mut inlay_map, inlay_snapshot) = InlayMap::new(buffer_snapshot.clone());
         let (mut fold_map, fold_snapshot) = FoldMap::new(inlay_snapshot);
+        let (mut conceal_map, conceal_snapshot) = ConcealMap::new(fold_snapshot);
         let tab_size = 1.try_into().unwrap();
-        let (mut tab_map, tab_snapshot) = TabMap::new(fold_snapshot, tab_size);
+        let (mut tab_map, tab_snapshot) = TabMap::new(conceal_snapshot, tab_size);
         let (wrap_map, wraps_snapshot) =
             cx.update(|cx| WrapMap::new(tab_snapshot, font("Helvetica"), px(14.0), None, cx));
         let mut block_map = BlockMap::new(wraps_snapshot.clone(), 1, 1);
@@ -3344,7 +3354,8 @@ mod tests {
         let (inlay_snapshot, inlay_edits) =
             inlay_map.sync(buffer_snapshot, buffer_subscription.consume().into_inner());
         let (fold_snapshot, fold_edits) = fold_map.read(inlay_snapshot, inlay_edits);
-        let (tab_snapshot, tab_edits) = tab_map.sync(fold_snapshot, fold_edits, tab_size);
+        let (conceal_snapshot, conceal_edits) = conceal_map.read(fold_snapshot, fold_edits);
+        let (tab_snapshot, tab_edits) = tab_map.sync(conceal_snapshot, conceal_edits, tab_size);
         let (wraps_snapshot, wrap_edits) = wrap_map.update(cx, |wrap_map, cx| {
             wrap_map.sync(tab_snapshot, tab_edits, cx)
         });
@@ -3367,7 +3378,8 @@ mod tests {
             buffer_subscription.consume().into_inner(),
         );
         let (fold_snapshot, fold_edits) = fold_map.read(inlay_snapshot, inlay_edits);
-        let (tab_snapshot, tab_edits) = tab_map.sync(fold_snapshot, fold_edits, tab_size);
+        let (conceal_snapshot, conceal_edits) = conceal_map.read(fold_snapshot, fold_edits);
+        let (tab_snapshot, tab_edits) = tab_map.sync(conceal_snapshot, conceal_edits, tab_size);
         let (wraps_snapshot, wrap_edits) = wrap_map.update(cx, |wrap_map, cx| {
             wrap_map.sync(tab_snapshot, tab_edits, cx)
         });
@@ -3484,7 +3496,8 @@ mod tests {
 
         let (_, inlay_snapshot) = InlayMap::new(buffer_snapshot.clone());
         let (_, fold_snapshot) = FoldMap::new(inlay_snapshot);
-        let (_, tab_snapshot) = TabMap::new(fold_snapshot, 4.try_into().unwrap());
+        let (_, conceal_snapshot) = ConcealMap::new(fold_snapshot);
+        let (_, tab_snapshot) = TabMap::new(conceal_snapshot, 4.try_into().unwrap());
         let (_, wrap_snapshot) =
             cx.update(|cx| WrapMap::new(tab_snapshot, font("Helvetica"), px(14.0), None, cx));
         let mut block_map = BlockMap::new(wrap_snapshot.clone(), 2, 1);
@@ -3829,7 +3842,8 @@ mod tests {
 
         let (_, inlay_snapshot) = InlayMap::new(buffer_snapshot);
         let (_, fold_snapshot) = FoldMap::new(inlay_snapshot);
-        let (_, tab_snapshot) = TabMap::new(fold_snapshot, 4.try_into().unwrap());
+        let (_, conceal_snapshot) = ConcealMap::new(fold_snapshot);
+        let (_, tab_snapshot) = TabMap::new(conceal_snapshot, 4.try_into().unwrap());
         let (_, wrap_snapshot) =
             cx.update(|cx| WrapMap::new(tab_snapshot, font("Helvetica"), px(14.0), None, cx));
         let mut block_map = BlockMap::new(wrap_snapshot.clone(), 2, 1);
@@ -3904,7 +3918,8 @@ mod tests {
         let mut buffer_snapshot = cx.update(|cx| buffer.read(cx).snapshot(cx));
         let (mut inlay_map, inlay_snapshot) = InlayMap::new(buffer_snapshot.clone());
         let (mut fold_map, fold_snapshot) = FoldMap::new(inlay_snapshot);
-        let (mut tab_map, tab_snapshot) = TabMap::new(fold_snapshot, 4.try_into().unwrap());
+        let (mut conceal_map, conceal_snapshot) = ConcealMap::new(fold_snapshot);
+        let (mut tab_map, tab_snapshot) = TabMap::new(conceal_snapshot, 4.try_into().unwrap());
         let font = test_font();
         let (wrap_map, wraps_snapshot) =
             cx.update(|cx| WrapMap::new(tab_snapshot, font, font_size, wrap_width, cx));
@@ -3964,8 +3979,10 @@ mod tests {
                     let (inlay_snapshot, inlay_edits) =
                         inlay_map.sync(buffer_snapshot.clone(), vec![]);
                     let (fold_snapshot, fold_edits) = fold_map.read(inlay_snapshot, inlay_edits);
+                    let (conceal_snapshot, conceal_edits) =
+                        conceal_map.read(fold_snapshot, fold_edits);
                     let (tab_snapshot, tab_edits) =
-                        tab_map.sync(fold_snapshot, fold_edits, tab_size);
+                        tab_map.sync(conceal_snapshot, conceal_edits, tab_size);
                     let (wraps_snapshot, wrap_edits) = wrap_map.update(cx, |wrap_map, cx| {
                         wrap_map.sync(tab_snapshot, tab_edits, cx)
                     });
@@ -4002,8 +4019,10 @@ mod tests {
                     let (inlay_snapshot, inlay_edits) =
                         inlay_map.sync(buffer_snapshot.clone(), vec![]);
                     let (fold_snapshot, fold_edits) = fold_map.read(inlay_snapshot, inlay_edits);
+                    let (conceal_snapshot, conceal_edits) =
+                        conceal_map.read(fold_snapshot, fold_edits);
                     let (tab_snapshot, tab_edits) =
-                        tab_map.sync(fold_snapshot, fold_edits, tab_size);
+                        tab_map.sync(conceal_snapshot, conceal_edits, tab_size);
                     let (wraps_snapshot, wrap_edits) = wrap_map.update(cx, |wrap_map, cx| {
                         wrap_map.sync(tab_snapshot, tab_edits, cx)
                     });
@@ -4023,8 +4042,10 @@ mod tests {
                     let (inlay_snapshot, inlay_edits) =
                         inlay_map.sync(buffer_snapshot.clone(), vec![]);
                     let (fold_snapshot, fold_edits) = fold_map.read(inlay_snapshot, inlay_edits);
+                    let (conceal_snapshot, conceal_edits) =
+                        conceal_map.read(fold_snapshot, fold_edits);
                     let (tab_snapshot, tab_edits) =
-                        tab_map.sync(fold_snapshot, fold_edits, tab_size);
+                        tab_map.sync(conceal_snapshot, conceal_edits, tab_size);
                     let (wraps_snapshot, wrap_edits) = wrap_map.update(cx, |wrap_map, cx| {
                         wrap_map.sync(tab_snapshot, tab_edits, cx)
                     });
@@ -4109,7 +4130,8 @@ mod tests {
             let (inlay_snapshot, inlay_edits) =
                 inlay_map.sync(buffer_snapshot.clone(), buffer_edits);
             let (fold_snapshot, fold_edits) = fold_map.read(inlay_snapshot, inlay_edits);
-            let (tab_snapshot, tab_edits) = tab_map.sync(fold_snapshot, fold_edits, tab_size);
+            let (conceal_snapshot, conceal_edits) = conceal_map.read(fold_snapshot, fold_edits);
+            let (tab_snapshot, tab_edits) = tab_map.sync(conceal_snapshot, conceal_edits, tab_size);
             let (wraps_snapshot, wrap_edits) = wrap_map.update(cx, |wrap_map, cx| {
                 wrap_map.sync(tab_snapshot, tab_edits, cx)
             });
@@ -4130,8 +4152,9 @@ mod tests {
             }));
 
             let mut inlay_point_cursor = wraps_snapshot.inlay_point_cursor();
-            let mut tab_point_cursor = wraps_snapshot.tab_point_cursor();
             let mut fold_point_cursor = wraps_snapshot.fold_point_cursor();
+            let mut conceal_point_cursor = wraps_snapshot.conceal_point_cursor();
+            let mut tab_point_cursor = wraps_snapshot.tab_point_cursor();
             let mut wrap_point_cursor = wraps_snapshot.wrap_point_cursor();
 
             // Note that this needs to be synced with the related section in BlockMap::sync
@@ -4140,11 +4163,10 @@ mod tests {
                 MultiBufferOffset(0)..,
                 |point, bias| {
                     wrap_point_cursor
-                        .map(
-                            tab_point_cursor.map(
-                                fold_point_cursor.map(inlay_point_cursor.map(point, bias), bias),
-                            ),
-                        )
+                        .map(tab_point_cursor.map(conceal_point_cursor.map(
+                            fold_point_cursor.map(inlay_point_cursor.map(point, bias), bias),
+                            bias,
+                        )))
                         .row()
                 },
             ));
@@ -4499,7 +4521,8 @@ mod tests {
         let buffer_snapshot = cx.update(|cx| buffer.read(cx).snapshot(cx));
         let (_inlay_map, inlay_snapshot) = InlayMap::new(buffer_snapshot.clone());
         let (_fold_map, fold_snapshot) = FoldMap::new(inlay_snapshot);
-        let (_tab_map, tab_snapshot) = TabMap::new(fold_snapshot, 4.try_into().unwrap());
+        let (_conceal_map, conceal_snapshot) = ConcealMap::new(fold_snapshot);
+        let (_tab_map, tab_snapshot) = TabMap::new(conceal_snapshot, 4.try_into().unwrap());
         let (_wrap_map, wraps_snapshot) =
             cx.update(|cx| WrapMap::new(tab_snapshot, font("Helvetica"), px(14.0), None, cx));
         let mut block_map = BlockMap::new(wraps_snapshot.clone(), 1, 1);
@@ -4549,7 +4572,8 @@ mod tests {
 
         let (_, inlay_snapshot) = InlayMap::new(buffer_snapshot.clone());
         let (_, fold_snapshot) = FoldMap::new(inlay_snapshot);
-        let (_, tab_snapshot) = TabMap::new(fold_snapshot, 4.try_into().unwrap());
+        let (_, conceal_snapshot) = ConcealMap::new(fold_snapshot);
+        let (_, tab_snapshot) = TabMap::new(conceal_snapshot, 4.try_into().unwrap());
         let (_, wrap_snapshot) =
             cx.update(|cx| WrapMap::new(tab_snapshot, font("Helvetica"), px(14.0), None, cx));
         let mut block_map = BlockMap::new(wrap_snapshot.clone(), 1, 1);
@@ -4594,7 +4618,8 @@ mod tests {
 
         let (_, inlay_snapshot) = InlayMap::new(buffer_snapshot.clone());
         let (_, fold_snapshot) = FoldMap::new(inlay_snapshot);
-        let (_, tab_snapshot) = TabMap::new(fold_snapshot, 4.try_into().unwrap());
+        let (_, conceal_snapshot) = ConcealMap::new(fold_snapshot);
+        let (_, tab_snapshot) = TabMap::new(conceal_snapshot, 4.try_into().unwrap());
         let (_, wrap_snapshot) =
             cx.update(|cx| WrapMap::new(tab_snapshot, font("Helvetica"), px(14.0), None, cx));
         let mut block_map = BlockMap::new(wrap_snapshot.clone(), 1, 1);
@@ -4661,8 +4686,9 @@ mod tests {
         let lhs_buffer_snapshot = cx.update(|cx| lhs_multibuffer.read(cx).snapshot(cx));
         let (mut _lhs_inlay_map, lhs_inlay_snapshot) = InlayMap::new(lhs_buffer_snapshot);
         let (mut _lhs_fold_map, lhs_fold_snapshot) = FoldMap::new(lhs_inlay_snapshot);
+        let (mut _lhs_conceal_map, lhs_conceal_snapshot) = ConcealMap::new(lhs_fold_snapshot);
         let (mut _lhs_tab_map, lhs_tab_snapshot) =
-            TabMap::new(lhs_fold_snapshot, 4.try_into().unwrap());
+            TabMap::new(lhs_conceal_snapshot, 4.try_into().unwrap());
         let (_lhs_wrap_map, lhs_wrap_snapshot) =
             cx.update(|cx| WrapMap::new(lhs_tab_snapshot, font("Helvetica"), px(14.0), None, cx));
         let lhs_block_map = BlockMap::new(lhs_wrap_snapshot.clone(), 0, 0);
@@ -4670,8 +4696,9 @@ mod tests {
         let rhs_buffer_snapshot = cx.update(|cx| rhs_multibuffer.read(cx).snapshot(cx));
         let (mut rhs_inlay_map, rhs_inlay_snapshot) = InlayMap::new(rhs_buffer_snapshot);
         let (mut rhs_fold_map, rhs_fold_snapshot) = FoldMap::new(rhs_inlay_snapshot);
+        let (mut rhs_conceal_map, rhs_conceal_snapshot) = ConcealMap::new(rhs_fold_snapshot);
         let (mut rhs_tab_map, rhs_tab_snapshot) =
-            TabMap::new(rhs_fold_snapshot, 4.try_into().unwrap());
+            TabMap::new(rhs_conceal_snapshot, 4.try_into().unwrap());
         let (_rhs_wrap_map, rhs_wrap_snapshot) =
             cx.update(|cx| WrapMap::new(rhs_tab_snapshot, font("Helvetica"), px(14.0), None, cx));
         let rhs_block_map = BlockMap::new(rhs_wrap_snapshot.clone(), 0, 0);
@@ -4792,8 +4819,13 @@ mod tests {
             rhs_inlay_map.sync(rhs_buffer_snapshot, subscription.consume().into_inner());
         let (rhs_fold_snapshot, rhs_fold_edits) =
             rhs_fold_map.read(rhs_inlay_snapshot, rhs_inlay_edits);
-        let (rhs_tab_snapshot, rhs_tab_edits) =
-            rhs_tab_map.sync(rhs_fold_snapshot, rhs_fold_edits, 4.try_into().unwrap());
+        let (rhs_conceal_snapshot, rhs_conceal_edits) =
+            rhs_conceal_map.read(rhs_fold_snapshot, rhs_fold_edits);
+        let (rhs_tab_snapshot, rhs_tab_edits) = rhs_tab_map.sync(
+            rhs_conceal_snapshot,
+            rhs_conceal_edits,
+            4.try_into().unwrap(),
+        );
         let (rhs_wrap_snapshot, rhs_wrap_edits) = _rhs_wrap_map.update(cx, |wrap_map, cx| {
             wrap_map.sync(rhs_tab_snapshot, rhs_tab_edits, cx)
         });

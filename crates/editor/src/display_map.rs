@@ -70,6 +70,7 @@
 mod dimensions;
 
 mod block_map;
+mod conceal_map;
 mod crease_map;
 mod custom_highlights;
 mod fold_map;
@@ -78,12 +79,15 @@ mod invisibles;
 mod tab_map;
 mod wrap_map;
 
-pub use crate::display_map::{fold_map::FoldMap, inlay_map::InlayMap, tab_map::TabMap};
+pub use crate::display_map::{
+    conceal_map::ConcealMap, fold_map::FoldMap, inlay_map::InlayMap, tab_map::TabMap,
+};
 pub use block_map::{
     Block, BlockChunks as DisplayChunks, BlockContext, BlockId, BlockMap, BlockPlacement,
     BlockPoint, BlockProperties, BlockRows, BlockStyle, CompanionView, CompanionViewMut,
     CustomBlockId, EditorMargins, RenderBlock, StickyHeaderExcerpt,
 };
+pub use conceal_map::{ConcealOffset, ConcealPoint};
 pub use crease_map::*;
 pub use fold_map::{
     ChunkRenderer, ChunkRendererContext, ChunkRendererId, Fold, FoldId, FoldPlaceholder, FoldPoint,
@@ -133,6 +137,7 @@ use crate::{
     EditorStyle, RowExt, hover_links::InlayHighlight, inlays::Inlay, movement::TextLayoutDetails,
 };
 use block_map::{BlockRow, BlockSnapshot};
+use conceal_map::ConcealSnapshot;
 use fold_map::FoldSnapshot;
 use inlay_map::InlaySnapshot;
 use tab_map::TabSnapshot;
@@ -217,6 +222,7 @@ pub struct DisplayMap {
     inlay_map: InlayMap,
     /// Decides where the fold indicators should be and tracks parts of a source file that are currently folded.
     fold_map: FoldMap,
+    conceal_map: ConcealMap,
     /// Keeps track of hard tabs in a buffer.
     tab_map: TabMap,
     /// Handles soft wrapping.
@@ -382,6 +388,7 @@ impl DisplayMap {
         let crease_map = CreaseMap::new(&buffer_snapshot);
         let (inlay_map, snapshot) = InlayMap::new(buffer_snapshot);
         let (fold_map, snapshot) = FoldMap::new(snapshot);
+        let (conceal_map, snapshot) = ConcealMap::new(snapshot);
         let (tab_map, snapshot) = TabMap::new(snapshot, tab_size);
         let (wrap_map, snapshot) = WrapMap::new(snapshot, font, font_size, wrap_width, cx);
         let block_map = BlockMap::new(snapshot, buffer_header_height, excerpt_header_height);
@@ -393,6 +400,7 @@ impl DisplayMap {
             buffer,
             buffer_subscription,
             fold_map,
+            conceal_map,
             inlay_map,
             tab_map,
             wrap_map,
@@ -453,12 +461,14 @@ impl DisplayMap {
             let tab_size = Self::tab_size(&self.buffer, cx);
             let (snapshot, edits) = self.inlay_map.sync(snapshot, edits.into_inner());
             let (mut writer, snapshot, edits) = self.fold_map.write(snapshot, edits);
+            let (snapshot, edits) = self.conceal_map.read(snapshot, edits);
             let (snapshot, edits) = self.tab_map.sync(snapshot, edits, tab_size);
             let (_snapshot, _edits) = self
                 .wrap_map
                 .update(cx, |wrap_map, cx| wrap_map.sync(snapshot, edits, cx));
 
             let (snapshot, edits) = writer.unfold_intersecting([Anchor::Min..Anchor::Max], true);
+            let (snapshot, edits) = self.conceal_map.read(snapshot, edits);
             let (snapshot, edits) = self.tab_map.sync(snapshot, edits, tab_size);
             let (snapshot, _edits) = self
                 .wrap_map
@@ -559,6 +569,7 @@ impl DisplayMap {
 
         let (snapshot, edits) = self.inlay_map.sync(buffer_snapshot, edits);
         let (snapshot, edits) = self.fold_map.read(snapshot, edits);
+        let (snapshot, edits) = self.conceal_map.read(snapshot, edits);
         let (snapshot, edits) = self.tab_map.sync(snapshot, edits, tab_size);
         self.wrap_map
             .update(cx, |map, cx| map.sync(snapshot, edits, cx))
@@ -720,6 +731,7 @@ impl DisplayMap {
 
         let (snapshot, edits) = self.inlay_map.sync(buffer_snapshot.clone(), edits);
         let (mut fold_map, snapshot, edits) = self.fold_map.write(snapshot, edits);
+        let (snapshot, edits) = self.conceal_map.read(snapshot, edits);
         let (snapshot, edits) = self.tab_map.sync(snapshot, edits, tab_size);
         let (snapshot, edits) = self
             .wrap_map
@@ -737,6 +749,7 @@ impl DisplayMap {
             }
         });
         let (snapshot, edits) = fold_map.fold(inline);
+        let (snapshot, edits) = self.conceal_map.read(snapshot, edits);
 
         let (snapshot, edits) = self.tab_map.sync(snapshot, edits, tab_size);
         let (snapshot, edits) = self
@@ -795,6 +808,7 @@ impl DisplayMap {
 
         let (snapshot, edits) = self.inlay_map.sync(snapshot, edits);
         let (mut fold_map, snapshot, edits) = self.fold_map.write(snapshot, edits);
+        let (snapshot, edits) = self.conceal_map.read(snapshot, edits);
         let (snapshot, edits) = self.tab_map.sync(snapshot, edits, tab_size);
         let (snapshot, edits) = self
             .wrap_map
@@ -802,6 +816,7 @@ impl DisplayMap {
         self.block_map.read(snapshot, edits, None);
 
         let (snapshot, edits) = fold_map.remove_folds(ranges, type_id);
+        let (snapshot, edits) = self.conceal_map.read(snapshot, edits);
         let (snapshot, edits) = self.tab_map.sync(snapshot, edits, tab_size);
         let (self_new_wrap_snapshot, self_new_wrap_edits) = self
             .wrap_map
@@ -829,6 +844,7 @@ impl DisplayMap {
 
         let (snapshot, edits) = self.inlay_map.sync(snapshot, edits);
         let (mut fold_map, snapshot, edits) = self.fold_map.write(snapshot, edits);
+        let (snapshot, edits) = self.conceal_map.read(snapshot, edits);
         let (snapshot, edits) = self.tab_map.sync(snapshot, edits, tab_size);
         let (snapshot, edits) = self
             .wrap_map
@@ -837,6 +853,7 @@ impl DisplayMap {
 
         let (snapshot, edits) =
             fold_map.unfold_intersecting(offset_ranges.iter().cloned(), inclusive);
+        let (snapshot, edits) = self.conceal_map.read(snapshot, edits);
         let (snapshot, edits) = self.tab_map.sync(snapshot, edits, tab_size);
         let (self_new_wrap_snapshot, self_new_wrap_edits) = self
             .wrap_map
@@ -1223,6 +1240,35 @@ impl DisplayMap {
         cleared
     }
 
+    pub fn set_concealments(
+        &mut self,
+        concealments: Vec<(Range<multi_buffer::Anchor>, gpui::SharedString)>,
+        cx: &mut Context<Self>,
+    ) {
+        let snapshot = self.buffer.read(cx).snapshot(cx);
+        let edits = self.buffer_subscription.consume().into_inner();
+        let tab_size = Self::tab_size(&self.buffer, cx);
+
+        let (snapshot, edits) = self.inlay_map.sync(snapshot, edits);
+        let (snapshot, _edits) = self.fold_map.read(snapshot, edits);
+        self.conceal_map.sync_fold_snapshot(snapshot);
+        let (snapshot, edits) = self.conceal_map.set_concealments(concealments);
+
+        let (snapshot, edits) = self.tab_map.sync(snapshot, edits, tab_size);
+        let (snapshot, edits) = self
+            .wrap_map
+            .update(cx, |map, cx| map.sync(snapshot, edits, cx));
+        self.block_map.read(snapshot, edits, None);
+    }
+
+    pub fn update_revealed_indices(&mut self, indices: HashSet<usize>, _cx: &mut Context<Self>) {
+        self.conceal_map.set_revealed_indices(indices);
+    }
+
+    pub fn concealments(&self) -> &[(Range<multi_buffer::Anchor>, gpui::SharedString)] {
+        self.conceal_map.concealments()
+    }
+
     pub fn set_font(&self, font: Font, font_size: Pixels, cx: &mut Context<Self>) -> bool {
         self.wrap_map
             .update(cx, |map, cx| map.set_font_with_size(font, font_size, cx))
@@ -1245,6 +1291,7 @@ impl DisplayMap {
 
         let (snapshot, edits) = self.inlay_map.sync(snapshot, edits);
         let (mut fold_map, snapshot, edits) = self.fold_map.write(snapshot, edits);
+        let (snapshot, edits) = self.conceal_map.read(snapshot, edits);
         let (snapshot, edits) = self.tab_map.sync(snapshot, edits, tab_size);
         let (snapshot, edits) = self
             .wrap_map
@@ -1253,6 +1300,7 @@ impl DisplayMap {
 
         let (snapshot, edits) = fold_map.update_fold_widths(widths);
         let widths_changed = !edits.is_empty();
+        let (snapshot, edits) = self.conceal_map.read(snapshot, edits);
         let (snapshot, edits) = self.tab_map.sync(snapshot, edits, tab_size);
         let (self_new_wrap_snapshot, self_new_wrap_edits) = self
             .wrap_map
@@ -1290,6 +1338,7 @@ impl DisplayMap {
 
         let (snapshot, edits) = self.inlay_map.sync(buffer_snapshot, edits);
         let (snapshot, edits) = self.fold_map.read(snapshot, edits);
+        let (snapshot, edits) = self.conceal_map.read(snapshot, edits);
         let (snapshot, edits) = self.tab_map.sync(snapshot, edits, tab_size);
         let (snapshot, edits) = self
             .wrap_map
@@ -1307,6 +1356,7 @@ impl DisplayMap {
 
         let (snapshot, edits) = self.inlay_map.splice(to_remove, to_insert);
         let (snapshot, edits) = self.fold_map.read(snapshot, edits);
+        let (snapshot, edits) = self.conceal_map.read(snapshot, edits);
         let (snapshot, edits) = self.tab_map.sync(snapshot, edits, tab_size);
         let (self_new_wrap_snapshot, self_new_wrap_edits) = self
             .wrap_map
@@ -1531,8 +1581,21 @@ impl DisplaySnapshot {
         &self.block_snapshot.wrap_snapshot.tab_snapshot
     }
 
+    pub fn conceal_snapshot(&self) -> &ConcealSnapshot {
+        &self
+            .block_snapshot
+            .wrap_snapshot
+            .tab_snapshot
+            .conceal_snapshot
+    }
+
     pub fn fold_snapshot(&self) -> &FoldSnapshot {
-        &self.block_snapshot.wrap_snapshot.tab_snapshot.fold_snapshot
+        &self
+            .block_snapshot
+            .wrap_snapshot
+            .tab_snapshot
+            .conceal_snapshot
+            .fold_snapshot
     }
 
     pub fn inlay_snapshot(&self) -> &InlaySnapshot {
@@ -1540,6 +1603,7 @@ impl DisplaySnapshot {
             .block_snapshot
             .wrap_snapshot
             .tab_snapshot
+            .conceal_snapshot
             .fold_snapshot
             .inlay_snapshot
     }
@@ -1549,6 +1613,7 @@ impl DisplaySnapshot {
             .block_snapshot
             .wrap_snapshot
             .tab_snapshot
+            .conceal_snapshot
             .fold_snapshot
             .inlay_snapshot
             .buffer
@@ -1646,7 +1711,10 @@ impl DisplaySnapshot {
     pub fn point_to_display_point(&self, point: MultiBufferPoint, bias: Bias) -> DisplayPoint {
         let inlay_point = self.inlay_snapshot().to_inlay_point(point);
         let fold_point = self.fold_snapshot().to_fold_point(inlay_point, bias);
-        let tab_point = self.tab_snapshot().fold_point_to_tab_point(fold_point);
+        let conceal_point = self.conceal_snapshot().to_conceal_point(fold_point, bias);
+        let tab_point = self
+            .tab_snapshot()
+            .conceal_point_to_tab_point(conceal_point);
         let wrap_point = self.wrap_snapshot().tab_point_to_wrap_point(tab_point);
         let block_point = self.block_snapshot.to_block_point(wrap_point);
         DisplayPoint(block_point)
@@ -1665,7 +1733,10 @@ impl DisplaySnapshot {
             .map(|inlay_range| {
                 let inlay_point_to_display_point = |inlay_point: InlayPoint, bias: Bias| {
                     let fold_point = self.fold_snapshot().to_fold_point(inlay_point, bias);
-                    let tab_point = self.tab_snapshot().fold_point_to_tab_point(fold_point);
+                    let conceal_point = self.conceal_snapshot().to_conceal_point(fold_point, bias);
+                    let tab_point = self
+                        .tab_snapshot()
+                        .conceal_point_to_tab_point(conceal_point);
                     let wrap_point = self.wrap_snapshot().tab_point_to_wrap_point(tab_point);
                     let block_point = self.block_snapshot.to_block_point(wrap_point);
                     DisplayPoint(block_point)
@@ -1709,10 +1780,11 @@ impl DisplaySnapshot {
         let block_point = point.0;
         let wrap_point = self.block_snapshot.to_wrap_point(block_point, bias);
         let tab_point = self.wrap_snapshot().to_tab_point(wrap_point);
-        let fold_point = self
+        let conceal_point = self
             .tab_snapshot()
-            .tab_point_to_fold_point(tab_point, bias)
+            .tab_point_to_conceal_point(tab_point, bias)
             .0;
+        let fold_point = conceal_point.to_fold_point(self.conceal_snapshot());
         fold_point.to_inlay_point(self.fold_snapshot())
     }
 
@@ -1721,14 +1793,21 @@ impl DisplaySnapshot {
         let block_point = point.0;
         let wrap_point = self.block_snapshot.to_wrap_point(block_point, bias);
         let tab_point = self.wrap_snapshot().to_tab_point(wrap_point);
-        self.tab_snapshot()
-            .tab_point_to_fold_point(tab_point, bias)
-            .0
+        let conceal_point = self
+            .tab_snapshot()
+            .tab_point_to_conceal_point(tab_point, bias)
+            .0;
+        conceal_point.to_fold_point(self.conceal_snapshot())
     }
 
     #[instrument(skip_all)]
     pub fn fold_point_to_display_point(&self, fold_point: FoldPoint) -> DisplayPoint {
-        let tab_point = self.tab_snapshot().fold_point_to_tab_point(fold_point);
+        let conceal_point = self
+            .conceal_snapshot()
+            .to_conceal_point(fold_point, Bias::Left);
+        let tab_point = self
+            .tab_snapshot()
+            .conceal_point_to_tab_point(conceal_point);
         let wrap_point = self.wrap_snapshot().tab_point_to_wrap_point(tab_point);
         let block_point = self.block_snapshot.to_block_point(wrap_point);
         DisplayPoint(block_point)
@@ -2530,10 +2609,11 @@ impl DisplayPoint {
     pub fn to_offset(self, map: &DisplaySnapshot, bias: Bias) -> MultiBufferOffset {
         let wrap_point = map.block_snapshot.to_wrap_point(self.0, bias);
         let tab_point = map.wrap_snapshot().to_tab_point(wrap_point);
-        let fold_point = map
+        let conceal_point = map
             .tab_snapshot()
-            .tab_point_to_fold_point(tab_point, bias)
+            .tab_point_to_conceal_point(tab_point, bias)
             .0;
+        let fold_point = conceal_point.to_fold_point(map.conceal_snapshot());
         let inlay_point = fold_point.to_inlay_point(map.fold_snapshot());
         map.inlay_snapshot()
             .to_buffer_offset(map.inlay_snapshot().to_offset(inlay_point))
@@ -4176,5 +4256,198 @@ pub mod tests {
         //   would produce an offset exceeding the buffer length
         let snapshot = map.update(cx, |map, cx| map.snapshot(cx));
         assert_eq!(snapshot.text(), "prefix more initial");
+    }
+
+    #[gpui::test]
+    fn test_set_concealments_full_pipeline(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| init_test(cx, &|_| {}));
+
+        let text = "func = lambda x: x + 1\n\n# C = A && B\na = True\nb = False\nc = a and b\n";
+        let buffer = cx.update(|cx| MultiBuffer::build_simple(text, cx));
+        let font_size = px(14.0);
+
+        let map = cx.new(|cx| {
+            DisplayMap::new(
+                buffer.clone(),
+                font("Helvetica"),
+                font_size,
+                None,
+                1,
+                1,
+                FoldPlaceholder::test(),
+                DiagnosticSeverity::Warning,
+                cx,
+            )
+        });
+
+        let snapshot = map.update(cx, |map, cx| map.snapshot(cx));
+        assert_eq!(
+            snapshot.text_chunks(DisplayRow(0)).collect::<String>(),
+            text,
+        );
+
+        let buffer_snapshot = cx.read(|cx| buffer.read(cx).snapshot(cx));
+
+        let replacements: &[(&str, &str)] = &[
+            ("!=", "≠"),
+            ("==", "≡"),
+            ("=>", "⇒"),
+            ("->", "→"),
+            ("&&", "∧"),
+            ("||", "∨"),
+            ("lambda", "λ"),
+        ];
+
+        let mut concealments = Vec::new();
+        for &(pattern, replacement) in replacements {
+            let mut search_from = 0;
+            while let Some(pos) = text[search_from..].find(pattern) {
+                let start = search_from + pos;
+                let end = start + pattern.len();
+                let start_anchor =
+                    buffer_snapshot.anchor_after(multi_buffer::MultiBufferOffset(start));
+                let end_anchor =
+                    buffer_snapshot.anchor_before(multi_buffer::MultiBufferOffset(end));
+                concealments.push((
+                    start_anchor..end_anchor,
+                    gpui::SharedString::from(replacement),
+                ));
+                search_from = end;
+            }
+        }
+
+        map.update(cx, |map, cx| {
+            map.set_concealments(concealments, cx);
+        });
+
+        let snapshot = map.update(cx, |map, cx| map.snapshot(cx));
+        let concealed_text = snapshot.text_chunks(DisplayRow(0)).collect::<String>();
+        assert_eq!(
+            concealed_text,
+            "func = λ x: x + 1\n\n# C = A ∧ B\na = True\nb = False\nc = a and b\n",
+        );
+
+        // Toggle off
+        map.update(cx, |map, cx| {
+            map.set_concealments(vec![], cx);
+        });
+
+        let snapshot = map.update(cx, |map, cx| map.snapshot(cx));
+        assert_eq!(
+            snapshot.text_chunks(DisplayRow(0)).collect::<String>(),
+            text,
+        );
+    }
+
+    #[gpui::test]
+    async fn test_conceal_reveal_with_wrapping(cx: &mut gpui::TestAppContext) {
+        cx.background_executor
+            .set_block_on_ticks(usize::MAX..=usize::MAX);
+        cx.update(|cx| init_test(cx, &|_| {}));
+
+        let text = "lambda x: x + 1\n";
+        let buffer = cx.update(|cx| MultiBuffer::build_simple(text, cx));
+        let font_size = px(14.0);
+
+        let map = cx.new(|cx| {
+            DisplayMap::new(
+                buffer.clone(),
+                font("Helvetica"),
+                font_size,
+                Some(px(200.0)),
+                1,
+                1,
+                FoldPlaceholder::test(),
+                DiagnosticSeverity::Warning,
+                cx,
+            )
+        });
+
+        let buffer_snapshot = cx.read(|cx| buffer.read(cx).snapshot(cx));
+        let start = buffer_snapshot.anchor_after(multi_buffer::MultiBufferOffset(0));
+        let end = buffer_snapshot.anchor_before(multi_buffer::MultiBufferOffset(6));
+
+        map.update(cx, |map, cx| {
+            map.set_concealments(vec![(start..end, gpui::SharedString::from("λ"))], cx);
+        });
+
+        let snapshot = map.update(cx, |map, cx| map.snapshot(cx));
+        assert_eq!(
+            snapshot.text_chunks(DisplayRow(0)).collect::<String>(),
+            "λ x: x + 1\n",
+        );
+
+        // Reveal concealment at index 0
+        map.update(cx, |map, cx| {
+            map.update_revealed_indices(HashSet::from_iter([0]), cx);
+        });
+
+        let snapshot = map.update(cx, |map, cx| map.snapshot(cx));
+        assert_eq!(
+            snapshot.text_chunks(DisplayRow(0)).collect::<String>(),
+            "lambda x: x + 1\n",
+        );
+    }
+
+    #[gpui::test]
+    fn test_conceal_and_reveal_full_pipeline(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| init_test(cx, &|_| {}));
+
+        let text = "x = 2\nlambda x: x + 1\n";
+        let buffer = cx.update(|cx| MultiBuffer::build_simple(text, cx));
+        let font_size = px(14.0);
+
+        let map = cx.new(|cx| {
+            DisplayMap::new(
+                buffer.clone(),
+                font("Helvetica"),
+                font_size,
+                None,
+                1,
+                1,
+                FoldPlaceholder::test(),
+                DiagnosticSeverity::Warning,
+                cx,
+            )
+        });
+
+        let buffer_snapshot = cx.read(|cx| buffer.read(cx).snapshot(cx));
+
+        // Conceal "lambda" at offset 6..12
+        let start = buffer_snapshot.anchor_after(multi_buffer::MultiBufferOffset(6));
+        let end = buffer_snapshot.anchor_before(multi_buffer::MultiBufferOffset(12));
+        let concealments = vec![(start..end, gpui::SharedString::from("λ"))];
+
+        map.update(cx, |map, cx| {
+            map.set_concealments(concealments, cx);
+        });
+
+        let snapshot = map.update(cx, |map, cx| map.snapshot(cx));
+        assert_eq!(
+            snapshot.text_chunks(DisplayRow(0)).collect::<String>(),
+            "x = 2\nλ x: x + 1\n",
+        );
+
+        // Reveal concealment at index 0 (simulating cursor on it)
+        map.update(cx, |map, cx| {
+            map.update_revealed_indices(HashSet::from_iter([0]), cx);
+        });
+
+        let snapshot = map.update(cx, |map, cx| map.snapshot(cx));
+        assert_eq!(
+            snapshot.text_chunks(DisplayRow(0)).collect::<String>(),
+            "x = 2\nlambda x: x + 1\n",
+        );
+
+        // Un-reveal (cursor moved away)
+        map.update(cx, |map, cx| {
+            map.update_revealed_indices(HashSet::default(), cx);
+        });
+
+        let snapshot = map.update(cx, |map, cx| map.snapshot(cx));
+        assert_eq!(
+            snapshot.text_chunks(DisplayRow(0)).collect::<String>(),
+            "x = 2\nλ x: x + 1\n",
+        );
     }
 }

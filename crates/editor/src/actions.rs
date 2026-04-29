@@ -859,6 +859,8 @@ actions!(
         ToggleInlineDiagnostics,
         /// Toggles edit prediction feature.
         ToggleEditPrediction,
+        /// Toggles text concealment (visual symbol replacement).
+        ToggleConceal,
         /// Toggles line numbers display.
         ToggleLineNumbers,
         /// Toggles the minimap display.

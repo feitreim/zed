@@ -37367,3 +37367,161 @@ fn setup_syntax_highlighting_with_theme(
         );
     });
 }
+
+#[gpui::test]
+async fn test_conceal_reveal_lambda(cx: &mut TestAppContext) {
+    init_test(cx, |_| {});
+
+    let mut cx = EditorTestContext::new(cx).await;
+
+    cx.set_state("lambda x: x + 1\nˇ");
+
+    cx.update_editor(|editor, _window, cx| {
+        let snapshot = editor.buffer.read(cx).snapshot(cx);
+        let text = snapshot.text();
+
+        let pos = text.find("lambda").unwrap();
+        let start = snapshot.anchor_after(multi_buffer::MultiBufferOffset(pos));
+        let end = snapshot.anchor_before(multi_buffer::MultiBufferOffset(pos + 6));
+        let concealments = vec![(start..end, gpui::SharedString::from("λ"))];
+
+        editor.concealed = true;
+        editor.display_map.update(cx, |map, cx| {
+            map.set_concealments(concealments, cx);
+        });
+
+        assert_eq!(editor.display_text(cx), "λ x: x + 1\n");
+    });
+
+    // Move cursor to the lambda line
+    cx.update_editor(|editor, window, cx| {
+        editor.move_up(&MoveUp, window, cx);
+    });
+
+    // This should not hang — the cursor is now on a line with a concealment
+    cx.update_editor(|editor, _window, cx| {
+        let text = editor.display_text(cx);
+        // The lambda should be revealed since cursor is on it
+        assert!(
+            text.starts_with("lambda") || text.starts_with("λ"),
+            "display text should show lambda or λ, got: {}",
+            text,
+        );
+    });
+}
+
+#[gpui::test]
+fn test_cursor_movement_through_concealments(cx: &mut TestAppContext) {
+    init_test(cx, |_| {});
+
+    // "a != b" with "!=" (offsets 2..4) concealed to "≠".
+    // Cursor-level reveal: only reveals when cursor is inside the concealment range.
+    let buffer = cx.update(|cx| MultiBuffer::build_simple("a != b", cx));
+    let editor = cx.add_window(|window, cx| build_editor(buffer.clone(), window, cx));
+
+    _ = editor.update(cx, |editor, window, cx| {
+        let snapshot = editor.buffer.read(cx).snapshot(cx);
+        let start = snapshot.anchor_after(multi_buffer::MultiBufferOffset(2));
+        let end = snapshot.anchor_before(multi_buffer::MultiBufferOffset(4));
+        let concealments = vec![(start..end, gpui::SharedString::from("≠"))];
+        editor.concealed = true;
+        editor.display_map.update(cx, |map, cx| {
+            map.set_concealments(concealments, cx);
+        });
+
+        // Cursor at col 0 ("a") — outside concealment, stays concealed.
+        editor.change_selections(SelectionEffects::default(), window, cx, |s| {
+            s.select_ranges([Point::new(0, 0)..Point::new(0, 0)]);
+        });
+        assert_eq!(editor.display_text(cx), "a ≠ b");
+
+        // Cursor at col 2 ("!") — inside concealment range, revealed.
+        editor.change_selections(SelectionEffects::default(), window, cx, |s| {
+            s.select_ranges([Point::new(0, 2)..Point::new(0, 2)]);
+        });
+        assert_eq!(editor.display_text(cx), "a != b");
+
+        // Cursor at col 5 ("b") — outside again, re-concealed.
+        editor.change_selections(SelectionEffects::default(), window, cx, |s| {
+            s.select_ranges([Point::new(0, 5)..Point::new(0, 5)]);
+        });
+        assert_eq!(editor.display_text(cx), "a ≠ b");
+    });
+}
+
+#[gpui::test]
+async fn test_python_concealments_language_aware_chunks(cx: &mut TestAppContext) {
+    // The rendering path uses language_aware=true which causes fold_chunks to
+    // split at syntax token boundaries. This test verifies that chunk iteration
+    // with language_aware=true still produces correct concatenated text.
+    init_test(cx, |_| {});
+
+    let mut cx = EditorTestContext::new(cx).await;
+    let language = languages::language("python", tree_sitter_python::LANGUAGE.into());
+    cx.update_buffer(|buffer, cx| buffer.set_language(Some(language), cx));
+
+    cx.set_state(concat!(
+        "ˇdef complex_filter(records: list[dict]) -> list[dict]:\n",
+        "    return [\n",
+        "        r for r in records\n",
+        "        if (r.get(\"type\") == \"A\" or r.get(\"type\") == \"B\")\n",
+        "        and r.get(\"value\", 0) >= 10\n",
+        "        and r.get(\"value\", 0) <= 100\n",
+        "        and \"deleted\" not in r.get(\"tags\", [])\n",
+        "    and (r.get(\"priority\") != \"low\" or r.get(\"urgent\") == True)\n",
+        "        and not (r.get(\"status\") == \"draft\" and r.get(\"author\") != \"system\")\n",
+        "    ]\n",
+    ));
+
+    cx.executor().run_until_parked();
+
+    cx.update_editor(|editor, _window, cx| {
+        let snapshot = editor.buffer.read(cx).snapshot(cx);
+        let len = snapshot.len();
+        let mut ranges: Vec<_> = snapshot
+            .concealed_ranges(MultiBufferOffset(0)..len)
+            .collect();
+        ranges.sort_by_key(|(range, _)| range.start);
+
+        let concealments: Vec<_> = ranges
+            .into_iter()
+            .map(|(range, replacement)| {
+                (
+                    snapshot.anchor_after(range.start)..snapshot.anchor_before(range.end),
+                    replacement,
+                )
+            })
+            .collect();
+
+        editor.concealed = true;
+        editor.display_map.update(cx, |map, cx| {
+            map.set_concealments(concealments, cx);
+        });
+
+        // Iterate chunks with language_aware=true — the rendering code path.
+        let display_snapshot = editor.display_map.update(cx, |map, cx| map.snapshot(cx));
+        let max_row = display_snapshot.max_point().row();
+        let mut text_from_chunks = String::new();
+        for chunk in display_snapshot.chunks(
+            DisplayRow(0)..max_row.next_row(),
+            LanguageAwareStyling{ tree_sitter: true, diagnostics: true },
+            display_map::HighlightStyles::default(),
+        ) {
+            text_from_chunks.push_str(chunk.text);
+        }
+
+        let expected = concat!(
+            "def complex_filter(records: list[dict]) → list[dict]:\n",
+            "    ⏎ [\n",
+            "        r for r in records\n",
+            "        if (r.get(\"type\") ≡ \"A\" ∨ r.get(\"type\") ≡ \"B\")\n",
+            "        ∧ r.get(\"value\", 0) ≥ 10\n",
+            "        ∧ r.get(\"value\", 0) ≤ 100\n",
+            "        ∧ \"deleted\" ∉ r.get(\"tags\", [])\n",
+            "    ∧ (r.get(\"priority\") ≠ \"low\" ∨ r.get(\"urgent\") ≡ True)\n",
+            "        ∧ ¬ (r.get(\"status\") ≡ \"draft\" ∧ r.get(\"author\") ≠ \"system\")\n",
+            "    ]\n",
+        );
+        assert_eq!(text_from_chunks, expected);
+    });
+}

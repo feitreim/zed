@@ -5115,6 +5115,43 @@ impl BufferSnapshot {
         })
     }
 
+    /// Returns ranges that should be visually concealed, along with their
+    /// replacement text. Driven by `concealments.scm` tree-sitter queries
+    /// with `@conceal` captures and `#set! conceal.replacement` properties.
+    pub fn concealed_ranges<T: ToOffset>(
+        &self,
+        range: Range<T>,
+    ) -> impl Iterator<Item = (Range<usize>, SharedString)> + '_ {
+        let offset_range = range.start.to_offset(self)..range.end.to_offset(self);
+        let mut syntax_matches = self.syntax.matches(offset_range, self, |grammar| {
+            grammar.conceal_config.as_ref().map(|config| &config.query)
+        });
+
+        let configs = syntax_matches
+            .grammars()
+            .iter()
+            .map(|grammar| grammar.conceal_config.as_ref())
+            .collect::<Vec<_>>();
+
+        iter::from_fn(move || {
+            loop {
+                let mat = syntax_matches.peek()?;
+                let result = configs[mat.grammar_index].and_then(|config| {
+                    let capture = mat
+                        .captures
+                        .iter()
+                        .find(|c| c.index == config.conceal_capture_ix)?;
+                    let replacement = config.replacements.get(mat.pattern_index)?.clone()?;
+                    Some((capture.node.byte_range(), replacement))
+                });
+                syntax_matches.advance();
+                if result.is_some() {
+                    return result;
+                }
+            }
+        })
+    }
+
     pub fn injections_intersecting_range<T: ToOffset>(
         &self,
         range: Range<T>,

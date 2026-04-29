@@ -5739,6 +5739,14 @@ impl MultiBufferSnapshot {
         .map(|(range, _, _)| range)
     }
 
+    pub fn concealed_ranges(
+        &self,
+        range: Range<MultiBufferOffset>,
+    ) -> impl Iterator<Item = (Range<MultiBufferOffset>, gpui::SharedString)> + '_ {
+        self.lift_buffer_metadata(range, |buffer, range| Some(buffer.concealed_ranges(range)))
+            .map(|(range, replacement, _)| (range, replacement))
+    }
+
     pub fn runnable_ranges(
         &self,
         range: Range<Anchor>,

@@ -29,22 +29,24 @@ fn to_tab_point_benchmark(c: &mut Criterion) {
             )),
             Bias::Left,
         );
-        let (_, snapshot) = TabMap::new(fold_snapshot, NonZeroU32::new(4).unwrap());
+        let (_, conceal_snapshot) = ConcealMap::new(fold_snapshot);
+        let conceal_point = conceal_snapshot.to_conceal_point(fold_point, Bias::Left);
+        let (_, snapshot) = TabMap::new(conceal_snapshot, NonZeroU32::new(4).unwrap());
 
-        (length, snapshot, fold_point)
+        (length, snapshot, conceal_point)
     };
 
     let inputs = [1024].into_iter().map(create_tab_map).collect_vec();
 
     let mut group = c.benchmark_group("To tab point");
 
-    for (batch_size, snapshot, fold_point) in inputs {
+    for (batch_size, snapshot, conceal_point) in &inputs {
         group.bench_with_input(
             BenchmarkId::new("to_tab_point", batch_size),
-            &snapshot,
+            snapshot,
             |bench, snapshot| {
                 bench.iter(|| {
-                    snapshot.fold_point_to_tab_point(fold_point);
+                    snapshot.conceal_point_to_tab_point(*conceal_point);
                 });
             },
         );
@@ -76,23 +78,25 @@ fn to_fold_point_benchmark(c: &mut Criterion) {
             Bias::Left,
         );
 
-        let (_, snapshot) = TabMap::new(fold_snapshot, NonZeroU32::new(4).unwrap());
-        let tab_point = snapshot.fold_point_to_tab_point(fold_point);
+        let (_, conceal_snapshot) = ConcealMap::new(fold_snapshot);
+        let conceal_point = conceal_snapshot.to_conceal_point(fold_point, Bias::Left);
+        let (_, snapshot) = TabMap::new(conceal_snapshot, NonZeroU32::new(4).unwrap());
+        let tab_point = snapshot.conceal_point_to_tab_point(conceal_point);
 
         (length, snapshot, tab_point)
     };
 
     let inputs = [1024].into_iter().map(create_tab_map).collect_vec();
 
-    let mut group = c.benchmark_group("To fold point");
+    let mut group = c.benchmark_group("To conceal point");
 
-    for (batch_size, snapshot, tab_point) in inputs {
+    for (batch_size, snapshot, tab_point) in &inputs {
         group.bench_with_input(
-            BenchmarkId::new("to_fold_point", batch_size),
-            &snapshot,
+            BenchmarkId::new("to_conceal_point", batch_size),
+            snapshot,
             |bench, snapshot| {
                 bench.iter(|| {
-                    snapshot.tab_point_to_fold_point(tab_point, Bias::Left);
+                    snapshot.tab_point_to_conceal_point(*tab_point, Bias::Left);
                 });
             },
         );

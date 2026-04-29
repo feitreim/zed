@@ -146,3 +146,7 @@ harness = false
 [[bench]]
 name = "display_map"
 harness = false
+
+[[bench]]
+name = "conceal_map"
+harness = false

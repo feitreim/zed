@@ -67,6 +67,15 @@ pub struct EditorSettings {
     pub completion_detail_alignment: CompletionDetailAlignment,
     pub diff_view_style: DiffViewStyle,
     pub minimum_split_diff_width: f32,
+    pub conceal: Conceal,
+}
+
+/// Runtime representation of conceal settings. The Vec is empty when no rules
+/// are configured. Each rule groups substitutions by language name.
+/// Deserialized from the `conceal.rules` key in settings.json via ConcealContent.
+#[derive(Clone, Debug, Default)]
+pub struct Conceal {
+    pub rules: Vec<settings::ConcealLanguageRule>,
 }
 #[derive(Debug, Clone)]
 pub struct Jupyter {
@@ -309,6 +318,9 @@ impl Settings for EditorSettings {
             completion_detail_alignment: editor.completion_detail_alignment.unwrap(),
             diff_view_style: editor.diff_view_style.unwrap(),
             minimum_split_diff_width: editor.minimum_split_diff_width.unwrap(),
+            conceal: Conceal {
+                rules: editor.conceal.and_then(|c| c.rules).unwrap_or_default(),
+            },
         }
     }
 }

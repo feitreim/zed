@@ -1,7 +1,8 @@
 use super::{
     Highlights,
+    conceal_map::ConcealRows,
     dimensions::RowDelta,
-    fold_map::{Chunk, FoldRows},
+    fold_map::Chunk,
     tab_map::{self, TabEdit, TabPoint, TabSnapshot},
 };
 
@@ -80,7 +81,7 @@ pub struct WrapChunks<'a> {
 
 #[derive(Clone)]
 pub struct WrapRows<'a> {
-    input_buffer_rows: FoldRows<'a>,
+    input_buffer_rows: ConcealRows<'a>,
     input_buffer_row: RowInfo,
     output_row: WrapRow,
     soft_wrapped: bool,
@@ -1355,7 +1356,9 @@ mod tests {
     use super::*;
     use crate::{
         MultiBuffer,
-        display_map::{fold_map::FoldMap, inlay_map::InlayMap, tab_map::TabMap},
+        display_map::{
+            conceal_map::ConcealMap, fold_map::FoldMap, inlay_map::InlayMap, tab_map::TabMap,
+        },
         test::test_font,
     };
     use futures::stream::StreamExt;
@@ -1389,7 +1392,8 @@ mod tests {
             let buffer_snapshot = buffer.read_with(cx, |buffer, cx| buffer.snapshot(cx));
             let (_inlay_map, inlay_snapshot) = InlayMap::new(buffer_snapshot);
             let (_fold_map, fold_snapshot) = FoldMap::new(inlay_snapshot);
-            let (mut tab_map, _) = TabMap::new(fold_snapshot, tab_size);
+            let (_conceal_map, conceal_snapshot) = ConcealMap::new(fold_snapshot);
+            let (mut tab_map, _) = TabMap::new(conceal_snapshot, tab_size);
             let tabs_snapshot = tab_map.set_max_expansion_column(32);
             let (_wrap_map, wrap_snapshot) =
                 cx.update(|cx| WrapMap::new(tabs_snapshot, font, font_size, soft_wrapping, cx));
@@ -1473,7 +1477,8 @@ mod tests {
         log::info!("InlayMap text: {:?}", inlay_snapshot.text());
         let (mut fold_map, fold_snapshot) = FoldMap::new(inlay_snapshot.clone());
         log::info!("FoldMap text: {:?}", fold_snapshot.text());
-        let (mut tab_map, _) = TabMap::new(fold_snapshot.clone(), tab_size);
+        let (mut conceal_map, conceal_snapshot) = ConcealMap::new(fold_snapshot.clone());
+        let (mut tab_map, _) = TabMap::new(conceal_snapshot, tab_size);
         let tabs_snapshot = tab_map.set_max_expansion_column(32);
         log::info!("TabMap text: {:?}", tabs_snapshot.text());
 
@@ -1520,8 +1525,10 @@ mod tests {
                 }
                 20..=39 => {
                     for (fold_snapshot, fold_edits) in fold_map.randomly_mutate(&mut rng) {
+                        let (conceal_snapshot, conceal_edits) =
+                            conceal_map.read(fold_snapshot, fold_edits);
                         let (tabs_snapshot, tab_edits) =
-                            tab_map.sync(fold_snapshot, fold_edits, tab_size);
+                            tab_map.sync(conceal_snapshot, conceal_edits, tab_size);
                         let (mut snapshot, wrap_edits) =
                             wrap_map.update(cx, |map, cx| map.sync(tabs_snapshot, tab_edits, cx));
                         snapshot.check_invariants();
@@ -1533,8 +1540,10 @@ mod tests {
                     let (inlay_snapshot, inlay_edits) =
                         inlay_map.randomly_mutate(&mut next_inlay_id, &mut rng);
                     let (fold_snapshot, fold_edits) = fold_map.read(inlay_snapshot, inlay_edits);
+                    let (conceal_snapshot, conceal_edits) =
+                        conceal_map.read(fold_snapshot, fold_edits);
                     let (tabs_snapshot, tab_edits) =
-                        tab_map.sync(fold_snapshot, fold_edits, tab_size);
+                        tab_map.sync(conceal_snapshot, conceal_edits, tab_size);
                     let (mut snapshot, wrap_edits) =
                         wrap_map.update(cx, |map, cx| map.sync(tabs_snapshot, tab_edits, cx));
                     snapshot.check_invariants();
@@ -1558,7 +1567,9 @@ mod tests {
             log::info!("InlayMap text: {:?}", inlay_snapshot.text());
             let (fold_snapshot, fold_edits) = fold_map.read(inlay_snapshot, inlay_edits);
             log::info!("FoldMap text: {:?}", fold_snapshot.text());
-            let (tabs_snapshot, tab_edits) = tab_map.sync(fold_snapshot, fold_edits, tab_size);
+            let (conceal_snapshot, conceal_edits) = conceal_map.read(fold_snapshot, fold_edits);
+            let (tabs_snapshot, tab_edits) =
+                tab_map.sync(conceal_snapshot, conceal_edits, tab_size);
             log::info!("TabMap text: {:?}", tabs_snapshot.text());
 
             let expected_text = wrap_text(&tabs_snapshot, wrap_width, &mut line_wrapper);

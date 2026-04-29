@@ -3,7 +3,8 @@ use editor::{
     Editor, EditorMode, MultiBuffer,
     actions::{DeleteToPreviousWordStart, SelectAll, SplitSelectionIntoLines},
 };
-use gpui::{AppContext, Focusable as _, TestAppContext, TestDispatcher};
+use gpui::{AppContext, Focusable as _, SharedString, TestAppContext, TestDispatcher};
+use multi_buffer::MultiBufferOffset;
 use rand::{Rng as _, SeedableRng as _, rngs::StdRng};
 use settings::SettingsStore;
 use ui::IntoElement;
@@ -115,6 +116,64 @@ fn editor_render(bencher: &mut Bencher<'_>, cx: &TestAppContext) {
     })
 }
 
+const CONCEAL_LINE: &str = "if x != y && a != b { z }\n";
+
+fn editor_render_with_concealments(bencher: &mut Bencher<'_>, cx: &TestAppContext) {
+    let mut cx = cx.clone();
+    let num_lines = 1000;
+    let text = CONCEAL_LINE.repeat(num_lines);
+    let buffer = cx.update(|cx| MultiBuffer::build_simple(&text, cx));
+
+    let cx = cx.add_empty_window();
+    let editor = cx.update(|window, cx| {
+        let editor = cx.new(|cx| {
+            let mut editor = Editor::new(EditorMode::full(), buffer.clone(), None, window, cx);
+            editor.set_style(editor::EditorStyle::default(), window, cx);
+            editor
+        });
+        window.focus(&editor.focus_handle(cx), cx);
+
+        // Set up concealments via the display map directly, since we
+        // don't have a real language server providing concealed_ranges.
+        let snapshot = buffer.read(cx).snapshot(cx);
+        let concealments: Vec<_> = text
+            .match_indices("!=")
+            .map(|(i, _)| {
+                let start = MultiBufferOffset(i);
+                let end = MultiBufferOffset(i + 2);
+                (
+                    snapshot.anchor_after(start)..snapshot.anchor_before(end),
+                    SharedString::from("≠"),
+                )
+            })
+            .chain(text.match_indices("&&").map(|(i, _)| {
+                let start = MultiBufferOffset(i);
+                let end = MultiBufferOffset(i + 2);
+                (
+                    snapshot.anchor_after(start)..snapshot.anchor_before(end),
+                    SharedString::from("∧"),
+                )
+            }))
+            .collect();
+
+        editor.update(cx, |editor, cx| {
+            editor.display_map.update(cx, |map, cx| {
+                map.set_concealments(concealments, cx);
+            });
+        });
+        editor
+    });
+
+    bencher.iter(|| {
+        cx.update(|window, cx| {
+            let mut view = editor.clone().into_any_element();
+            let _ = view.request_layout(window, cx);
+            let _ = view.prepaint(window, cx);
+            view.paint(window, cx);
+        });
+    })
+}
+
 pub fn benches() {
     let dispatcher = TestDispatcher::new(1);
     let cx = gpui::TestAppContext::build(dispatcher, None);
@@ -136,6 +195,11 @@ pub fn benches() {
         BenchmarkId::new("editor_render", "TestAppContext"),
         &cx,
         editor_render,
+    );
+    group.bench_with_input(
+        BenchmarkId::new("editor_render_with_concealments", "TestAppContext"),
+        &cx,
+        editor_render_with_concealments,
     );
 
     group.finish();
