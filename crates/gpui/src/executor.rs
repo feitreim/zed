@@ -167,9 +167,15 @@ impl BackgroundExecutor {
     }
 
     /// In tests, run an arbitrary number of tasks (determined by the SEED environment variable)
+    ///
+    /// Dispatchers without seeded randomness (benchmarks, for instance) have no
+    /// delay to simulate, so this resolves immediately for them.
     #[cfg(any(test, feature = "test-support"))]
     pub fn simulate_random_delay(&self) -> impl Future<Output = ()> + use<> {
-        self.dispatcher.as_test().unwrap().simulate_random_delay()
+        match self.dispatcher.as_test() {
+            Some(dispatcher) => futures::future::Either::Left(dispatcher.simulate_random_delay()),
+            None => futures::future::Either::Right(std::future::ready(())),
+        }
     }
 
     /// In tests, move time forward. This does not run any tasks, but does make `timer`s ready.

@@ -101,21 +101,25 @@ where
 }
 
 pub fn init_test(cx: &mut TestAppContext) {
-    cx.update(|cx| {
-        let settings_store = SettingsStore::test(cx);
-        cx.set_global(settings_store);
-        // Use an isolated DB so parallel tests can't see each other's
-        // persisted records (e.g. created-worktree records).
-        cx.set_global(db::AppDatabase::test_new());
-        cx.set_global(acp_thread::StubSessionCounter(
-            std::sync::atomic::AtomicUsize::new(0),
-        ));
-        theme_settings::init(theme::LoadThemes::JustBase, cx);
-        editor::init(cx);
-        release_channel::init("0.0.0".parse().unwrap(), cx);
-        agent_panel::init(cx);
-        crate::terminal_thread_metadata_store::TerminalThreadMetadataStore::init_global(cx);
-    });
+    cx.update(init_globals);
+}
+
+/// Initializes the globals the agent UI needs, for callers that hold an `App`
+/// rather than a `TestAppContext` (benchmarks, in particular).
+pub fn init_globals(cx: &mut App) {
+    let settings_store = SettingsStore::test(cx);
+    cx.set_global(settings_store);
+    // Use an isolated DB so parallel tests can't see each other's
+    // persisted records (e.g. created-worktree records).
+    cx.set_global(db::AppDatabase::test_new());
+    cx.set_global(acp_thread::StubSessionCounter(
+        std::sync::atomic::AtomicUsize::new(0),
+    ));
+    theme_settings::init(theme::LoadThemes::JustBase, cx);
+    editor::init(cx);
+    release_channel::init("0.0.0".parse().unwrap(), cx);
+    agent_panel::init(cx);
+    crate::terminal_thread_metadata_store::TerminalThreadMetadataStore::init_global(cx);
 }
 
 /// Returns the creation time assigned to a linked worktree's git metadata
@@ -263,13 +267,28 @@ pub fn open_thread_with_custom_connection<C>(
 }
 
 pub fn send_message(panel: &Entity<AgentPanel>, cx: &mut VisualTestContext) {
-    let thread_view = panel.read_with(cx, |panel, cx| panel.active_thread_view(cx).unwrap());
-    let message_editor = thread_view.read_with(cx, |view, _cx| view.message_editor.clone());
-    message_editor.update_in(cx, |editor, window, cx| {
-        editor.set_text("Hello", window, cx);
-    });
-    thread_view.update_in(cx, |view, window, cx| view.send(window, cx));
+    cx.update(|window, cx| send_message_with_text(panel, "Hello", window, cx));
     cx.run_until_parked();
+}
+
+/// Types `text` into the active thread's message editor and sends it, for
+/// callers that hold a `Window` and an `App` rather than a
+/// `VisualTestContext`.
+pub fn send_message_with_text(
+    panel: &Entity<AgentPanel>,
+    text: &str,
+    window: &mut Window,
+    cx: &mut App,
+) {
+    let thread_view = panel
+        .read(cx)
+        .active_thread_view(cx)
+        .expect("panel has no active thread view");
+    let message_editor = thread_view.read(cx).message_editor.clone();
+    message_editor.update(cx, |editor, cx| {
+        editor.set_text(text, window, cx);
+    });
+    thread_view.update(cx, |view, cx| view.send(window, cx));
 }
 
 pub fn type_draft_prompt(panel: &Entity<AgentPanel>, text: &str, cx: &mut VisualTestContext) {
