@@ -2344,6 +2344,29 @@ impl Window {
         self.on_next_frame(move |_, cx| cx.notify(entity));
     }
 
+    /// Schedule a redraw of the current view for the first frame at or after
+    /// `deadline`, without invalidating the window on the frames in between.
+    ///
+    /// [`Self::request_animation_frame`] redraws the window on every frame,
+    /// which is what continuous animations need. Animations whose output only
+    /// changes at known times — e.g. a spinner advancing to its next glyph —
+    /// can use this instead: each frame before `deadline` merely re-arms the
+    /// callback, and the first frame past it notifies the view.
+    pub fn request_animation_frame_at(&self, deadline: Instant) {
+        let view = self.current_view();
+        self.notify_view_on_frame_at(deadline, view);
+    }
+
+    fn notify_view_on_frame_at(&self, deadline: Instant, view: EntityId) {
+        self.on_next_frame(move |window, cx| {
+            if Instant::now() >= deadline {
+                cx.notify(view);
+            } else {
+                window.notify_view_on_frame_at(deadline, view);
+            }
+        });
+    }
+
     /// Runs all callbacks scheduled via [`Self::on_next_frame`], returning how many ran.
     ///
     /// Tests have no platform frame loop, so this simulates the delivery of the

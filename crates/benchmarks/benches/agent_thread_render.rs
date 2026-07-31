@@ -5,8 +5,10 @@
 //! GPU use spike for the whole duration of an agent turn. Two things redraw the
 //! window while a turn is in flight, and the benchmarks separate them:
 //!
-//! * The "generating" spinner is a repeating animation, so it asks for a new
-//!   frame every vsync for as long as the turn lasts (`agent_animation_frame`).
+//! * The "generating" spinner is a repeating animation. It used to ask for a
+//!   new frame every vsync for as long as the turn lasted; it now only
+//!   invalidates the window when it advances to its next glyph
+//!   (`agent_animation_frame` measures the per-vsync cost either way).
 //! * Streamed assistant text is appended to a `Markdown` entity, which reparses
 //!   and redraws (`agent_stream_chunk`).
 //!
@@ -321,13 +323,21 @@ impl Harness {
             "thread should be generating for the whole benchmark"
         );
 
-        // Settle any one-off frame callbacks the setup queued, then check that
-        // the panel is (or isn't) redrawing on its own, which is the behavior
-        // these benchmarks exist to measure.
-        for _ in 0..IDLE_FRAMES {
-            self.simulate_frame(cx);
+        // Settle transient animations before measuring: the streamed chunk
+        // above re-shows the scrollbar, whose fade is a real-time animation
+        // that redraws every frame until it completes, so give it wall-clock
+        // time to finish. With motion enabled, the spinner's own stepped
+        // redraws (at most one per ~57-100ms glyph interval) can still land
+        // in a burst, hence a threshold of 1 instead of 0.
+        let settled_threshold = if self.layout.reduce_motion { 0 } else { 1 };
+        let mut draws = usize::MAX;
+        for _ in 0..80 {
+            draws = self.count_draws(IDLE_FRAMES, cx);
+            if draws <= settled_threshold {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(25));
         }
-        let draws = self.count_draws(IDLE_FRAMES, cx);
         if self.layout.reduce_motion {
             assert_eq!(
                 draws, 0,
@@ -335,9 +345,23 @@ impl Harness {
                  with no new content and reduce_motion on"
             );
         } else {
-            assert_eq!(
-                draws, IDLE_FRAMES,
-                "the generating spinner should redraw the window every frame"
+            // The spinner is a stepped animation: it only invalidates the
+            // window when it advances to its next glyph (every ~57-100ms), so
+            // back-to-back frames with no new content shouldn't draw.
+            assert!(
+                draws <= 1,
+                "a generating panel redrew {draws} times in {IDLE_FRAMES} \
+                 back-to-back frames; the spinner should only redraw when its \
+                 glyph advances"
+            );
+            // But it must still be animating: once the spinner's glyph
+            // interval has elapsed, the next frame has to redraw.
+            std::thread::sleep(std::time::Duration::from_millis(110));
+            let draws = self.count_draws(2, cx);
+            assert!(
+                draws >= 1,
+                "the generating spinner should redraw once its glyph interval \
+                 has elapsed"
             );
         }
     }

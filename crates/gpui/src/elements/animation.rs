@@ -19,6 +19,17 @@ pub struct Animation {
     /// A function that takes a delta between 0 and 1 and returns a new delta
     /// between 0 and 1 based on the given easing function.
     pub easing: Rc<dyn Fn(f32) -> f32>,
+    /// The number of distinct visual states this animation renders per cycle,
+    /// or `None` for a continuous animation.
+    ///
+    /// A continuous animation invalidates the window on every frame for as
+    /// long as it runs. When the animation only changes its output at a
+    /// coarser cadence — a spinner cycling through N glyphs, a label cycling
+    /// through dots — that redraws the window at the display's full refresh
+    /// rate to render identical frames. Setting `steps` quantizes the delta
+    /// passed to the animator to N values per cycle and only invalidates the
+    /// window when the animation crosses into the next step.
+    pub steps: Option<usize>,
 }
 
 impl Animation {
@@ -29,6 +40,7 @@ impl Animation {
             duration,
             oneshot: true,
             easing: Rc::new(linear),
+            steps: None,
         }
     }
 
@@ -43,6 +55,20 @@ impl Animation {
     /// between 0 and 1
     pub fn with_easing(mut self, easing: impl Fn(f32) -> f32 + 'static) -> Self {
         self.easing = Rc::new(easing);
+        self
+    }
+
+    /// Declare that this animation only renders `steps` distinct states per
+    /// cycle.
+    ///
+    /// The delta passed to the animator is quantized to `steps` values
+    /// (before easing is applied), and the window is only redrawn when the
+    /// animation advances from one step to the next instead of on every
+    /// frame. Use this whenever the animation changes at a coarser cadence
+    /// than the display's refresh rate, so it doesn't force full-window
+    /// redraws at that rate for its whole lifetime.
+    pub fn with_steps(mut self, steps: usize) -> Self {
+        self.steps = Some(steps);
         self
     }
 }
@@ -188,7 +214,25 @@ impl<E: IntoElement + 'static> Element for AnimationElement<E> {
                 }
                 (animation_ix, delta, done)
             };
-            let delta = (self.animations[animation_ix].easing)(delta);
+            let animation = &self.animations[animation_ix];
+            // When the animation is stepped, quantize the delta so all frames
+            // within a step render identically, and note when the next step
+            // begins so the redraw can be deferred until then.
+            let mut next_step_deadline = None;
+            let delta = match animation.steps {
+                Some(steps) if !done && delta < 1.0 => {
+                    let steps = steps.max(1) as f32;
+                    let step = (delta * steps).floor();
+                    let remaining_fraction = ((step + 1.0) / steps - delta).max(0.0);
+                    next_step_deadline = Some(
+                        Instant::now()
+                            + animation.duration.mul_f32(remaining_fraction.min(1.0)),
+                    );
+                    step / steps
+                }
+                _ => delta,
+            };
+            let delta = (animation.easing)(delta);
 
             debug_assert!(
                 (0.0..=1.0).contains(&delta),
@@ -199,7 +243,11 @@ impl<E: IntoElement + 'static> Element for AnimationElement<E> {
             let mut element = (self.animator)(element, animation_ix, delta).into_any_element();
 
             if !done {
-                window.request_animation_frame();
+                if let Some(deadline) = next_step_deadline {
+                    window.request_animation_frame_at(deadline);
+                } else {
+                    window.request_animation_frame();
+                }
             }
 
             ((element.request_layout(window, cx), element), state)
@@ -371,6 +419,61 @@ mod tests {
             assert_eq!(simulate_next_frame(&window, cx), 1);
             assert_eq!(rendered_deltas.borrow().len(), expected_frames);
         }
+    }
+
+    struct SteppedAnimationTestView {
+        rendered_deltas: Rc<RefCell<Vec<f32>>>,
+    }
+
+    impl Render for SteppedAnimationTestView {
+        fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+            let rendered_deltas = self.rendered_deltas.clone();
+            div().size_full().child(div().with_animation(
+                "stepped-animation",
+                Animation::new(Duration::from_secs(2)).repeat().with_steps(10),
+                move |this, delta| {
+                    rendered_deltas.borrow_mut().push(delta);
+                    this
+                },
+            ))
+        }
+    }
+
+    #[gpui::test]
+    fn test_stepped_animation_only_rerenders_on_step_boundaries(cx: &mut TestAppContext) {
+        let rendered_deltas = Rc::new(RefCell::new(Vec::new()));
+        let window = cx.open_window(size(px(100.), px(100.)), {
+            let rendered_deltas = rendered_deltas.clone();
+            move |_, _| SteppedAnimationTestView { rendered_deltas }
+        });
+        cx.run_until_parked();
+        assert_eq!(*rendered_deltas.borrow(), vec![0.0]);
+
+        // Frames within the current 200ms step re-arm the animation's frame
+        // callback without invalidating the window, so nothing re-renders.
+        for _ in 0..3 {
+            let callback_count = window
+                .update(cx, |_, window, cx| window.simulate_next_frame(cx))
+                .unwrap();
+            assert_eq!(callback_count, 1);
+            cx.run_until_parked();
+            assert_eq!(rendered_deltas.borrow().len(), 1);
+        }
+
+        // Once the step interval has elapsed, the next frame re-renders with a
+        // delta quantized to a step boundary.
+        std::thread::sleep(Duration::from_millis(250));
+        window
+            .update(cx, |_, window, cx| window.simulate_next_frame(cx))
+            .unwrap();
+        cx.run_until_parked();
+        let rendered_deltas = rendered_deltas.borrow();
+        assert_eq!(rendered_deltas.len(), 2);
+        let delta = rendered_deltas[1];
+        assert!(
+            (delta * 10.0).fract() == 0.0 && delta > 0.0,
+            "expected a quantized, advanced delta, got {delta}"
+        );
     }
 
     #[gpui::test]

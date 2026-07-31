@@ -87,8 +87,8 @@ impl RenderOnce for LoadingLabel {
         self.base.color(Color::Muted).with_animations(
             "loading_label",
             vec![
-                Animation::new(Duration::from_secs(1)),
-                Animation::new(Duration::from_secs(1)).repeat(),
+                Animation::new(Duration::from_secs(1)).with_steps(text.len().max(1)),
+                Animation::new(Duration::from_secs(1)).repeat().with_steps(4),
             ],
             move |mut label, animation_ix, delta| {
                 match animation_ix {

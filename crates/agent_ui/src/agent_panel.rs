@@ -5348,6 +5348,9 @@ impl AgentPanel {
                                 "generating_title",
                                 Animation::new(Duration::from_secs(2))
                                     .repeat()
+                                    // ~30Hz is indistinguishable for a slow alpha
+                                    // pulse and avoids redrawing at full refresh rate.
+                                    .with_steps(60)
                                     .with_easing(pulsating_between(0.4, 0.8)),
                                 |label, delta| label.alpha(delta),
                             )
@@ -6020,6 +6023,7 @@ impl AgentPanel {
                     "pulsating-icon",
                     Animation::new(Duration::from_secs(1))
                         .repeat()
+                        .with_steps(30)
                         .with_easing(pulsating_between(0.2, 0.6)),
                     |icon, delta| icon.opacity(delta),
                 )

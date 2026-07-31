@@ -166,7 +166,7 @@ impl RenderOnce for SpinnerLabel {
 
         self.base.with_animation(
             self.variant.animation_id(),
-            Animation::new(duration).repeat(),
+            Animation::new(duration).repeat().with_steps(frames.len()),
             move |mut label, delta| {
                 let frame_index = (delta * frames.len() as f32) as usize % frames.len();
 

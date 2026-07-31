@@ -3324,6 +3324,9 @@ impl Render for ConversationView {
                             "loading-agent-label",
                             Animation::new(Duration::from_secs(2))
                                 .repeat()
+                                // ~30Hz is indistinguishable for a slow alpha
+                                // pulse and avoids redrawing at full refresh rate.
+                                .with_steps(60)
                                 .with_easing(pulsating_between(0.3, 0.7)),
                             |label, delta| label.alpha(delta),
                         ),
