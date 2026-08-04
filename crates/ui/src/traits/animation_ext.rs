@@ -31,15 +31,9 @@ pub trait CommonAnimationExt: AnimationExt {
     where
         Self: Transformable + Sized,
     {
-        // Advancing the rotation ~30 times per second is visually smooth for
-        // an icon-sized spinner and keeps it from forcing a full-window
-        // redraw on every vsync for as long as it's shown.
-        let steps = (duration.saturating_mul(30)).max(1) as usize;
         self.with_animation(
             id,
-            Animation::new(Duration::from_secs(duration))
-                .repeat()
-                .with_steps(steps),
+            Animation::new(Duration::from_secs(duration)).repeat(),
             |component, delta| component.transform(Transformation::rotate(percentage(delta))),
         )
     }
