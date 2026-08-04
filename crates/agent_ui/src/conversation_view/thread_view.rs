@@ -6043,6 +6043,11 @@ impl ThreadView {
             }),
         )
         .with_sizing_behavior(gpui::ListSizingBehavior::Auto)
+        // Entries render from entity state (the thread, per-chunk Markdown
+        // entities, embedded editor/terminal views), so unchanged entries can
+        // be replayed instead of re-rendered when something else redraws the
+        // window (the generating spinner, the center editor, ...).
+        .with_item_render_caching()
         .flex_grow_1()
     }
 

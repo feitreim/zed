@@ -10,10 +10,10 @@
 use crate::{
     AnyElement, App, AvailableSpace, Bounds, ContentMask, DispatchPhase, Edges, Element, EntityId,
     FocusHandle, GlobalElementId, Hitbox, HitboxBehavior, InspectorElementId, IntoElement,
-    Overflow, Pixels, Point, ScrollDelta, ScrollWheelEvent, Size, Style, StyleRefinement, Styled,
-    Window, point, px, size,
+    Overflow, PaintIndex, Pixels, Point, PrepaintStateIndex, ScrollDelta, ScrollWheelEvent, Size,
+    Style, StyleRefinement, Styled, Window, point, px, size,
 };
-use collections::VecDeque;
+use collections::{FxHashSet, VecDeque};
 use refineable::Refineable as _;
 use std::{cell::RefCell, ops::Range, rc::Rc};
 use sum_tree::{Bias, Dimensions, SumTree};
@@ -30,6 +30,7 @@ pub fn list(
         render_item: Box::new(render_item),
         style: StyleRefinement::default(),
         sizing_behavior: ListSizingBehavior::default(),
+        cache_items: false,
     }
 }
 
@@ -39,12 +40,39 @@ pub struct List {
     render_item: Box<RenderItemFn>,
     style: StyleRefinement,
     sizing_behavior: ListSizingBehavior,
+    cache_items: bool,
 }
 
 impl List {
     /// Set the sizing behavior for the list.
     pub fn with_sizing_behavior(mut self, behavior: ListSizingBehavior) -> Self {
         self.sizing_behavior = behavior;
+        self
+    }
+
+    /// Reuse each item's rendered output across draws while the item is
+    /// unchanged, instead of re-rendering every visible item on every draw.
+    ///
+    /// An item's recorded output is replayed when all of the following hold:
+    ///
+    /// * the item was drawn on the immediately preceding draw of the window,
+    /// * none of the entities its render/prepaint/paint accessed have been
+    ///   notified since,
+    /// * it occupies the same bounds (an item shifted by scrolling or by an
+    ///   earlier item changing height is re-rendered), and
+    /// * the window is not doing a full refresh.
+    ///
+    /// Correctness requirement: items must render exclusively from entity
+    /// state (anything reached through `Entity::read`/`update`, including the
+    /// view that owns the list). State changes outside entities must be
+    /// accompanied by [`ListState::splice`] or [`ListState::remeasure_items`]
+    /// for the affected items, which is already this element's contract for
+    /// height changes.
+    ///
+    /// Only supported with [`ListSizingBehavior::Auto`]; ignored under
+    /// [`ListSizingBehavior::Infer`].
+    pub fn with_item_render_caching(mut self) -> Self {
+        self.cache_items = true;
         self
     }
 }
@@ -231,8 +259,119 @@ struct LayoutItemsResponse {
 
 struct ItemLayout {
     index: usize,
-    element: AnyElement,
     size: Size<Pixels>,
+    render: ItemRender,
+    /// Where to record this item's output after painting, shared with the
+    /// item's slot in the tree. `None` when caching is disabled.
+    cache_slot: Option<ItemCacheSlot>,
+    /// Entities accessed while rendering/prepainting/painting the item, used
+    /// to invalidate the recorded output when any of them is notified.
+    accessed_entities: FxHashSet<EntityId>,
+    /// The origin the item was prepainted at, filled in during prepaint.
+    origin: Point<Pixels>,
+    /// The prepaint range the item occupies in the frame being built, whether
+    /// freshly prepainted or replayed. Filled in during prepaint.
+    new_prepaint_range: Option<Range<PrepaintStateIndex>>,
+}
+
+enum ItemRender {
+    /// A freshly rendered element awaiting prepaint and paint.
+    Element(AnyElement),
+    /// A content-valid recording from the previous draw. Prepaint replays it
+    /// if the item's origin is unchanged, and re-renders the item otherwise.
+    Pending(ItemRenderCache),
+    /// Prepaint replayed the recording; paint must replay this range.
+    Reused { paint_range: Range<PaintIndex> },
+}
+
+impl ItemLayout {
+    fn rendered(
+        index: usize,
+        element: AnyElement,
+        size: Size<Pixels>,
+        cache_slot: Option<ItemCacheSlot>,
+        accessed_entities: FxHashSet<EntityId>,
+    ) -> Self {
+        Self {
+            index,
+            size,
+            render: ItemRender::Element(element),
+            cache_slot,
+            accessed_entities,
+            origin: Point::default(),
+            new_prepaint_range: None,
+        }
+    }
+
+    fn pending(index: usize, cache: ItemRenderCache, cache_slot: ItemCacheSlot) -> Self {
+        Self {
+            index,
+            size: cache.size,
+            render: ItemRender::Pending(cache),
+            cache_slot: Some(cache_slot),
+            accessed_entities: FxHashSet::default(),
+            origin: Point::default(),
+            new_prepaint_range: None,
+        }
+    }
+}
+
+/// One list item's recorded draw output. The ranges index into the frame the
+/// item was last drawn in, which the window keeps for exactly one draw, so a
+/// recording is replayable only on the draw immediately following the one
+/// that produced it (tracked via `draw_serial`).
+struct ItemRenderCache {
+    draw_serial: u64,
+    origin: Point<Pixels>,
+    size: Size<Pixels>,
+    prepaint_range: Range<PrepaintStateIndex>,
+    paint_range: Range<PaintIndex>,
+    accessed_entities: FxHashSet<EntityId>,
+}
+
+type ItemCacheSlot = Rc<RefCell<Option<ItemRenderCache>>>;
+
+/// Takes the item's recording if it is still valid content-wise. Taking (not
+/// cloning) means a recording can never be replayed twice in one draw: the
+/// replay consumes pieces of the previous frame (dispatch nodes, tooltip
+/// requests), so a second replay — e.g. after an autoscroll retry rolls back
+/// the first — must fall back to a fresh render.
+fn take_content_valid_cache(slot: &ItemCacheSlot, window: &Window) -> Option<ItemRenderCache> {
+    let mut slot = slot.borrow_mut();
+    let cache = slot.as_ref()?;
+    if cache.draw_serial + 1 != window.draw_serial()
+        || window.refreshing
+        || cache
+            .accessed_entities
+            .iter()
+            .any(|entity| window.dirty_views.contains(entity))
+    {
+        *slot = None;
+        return None;
+    }
+    slot.take()
+}
+
+fn render_and_measure(
+    item_index: usize,
+    available_item_space: Size<AvailableSpace>,
+    detect_accessed_entities: bool,
+    render_item: &mut RenderItemFn,
+    window: &mut Window,
+    cx: &mut App,
+) -> (AnyElement, Size<Pixels>, FxHashSet<EntityId>) {
+    if detect_accessed_entities {
+        let ((element, size), accessed_entities) = cx.detect_accessed_entities_isolated(|cx| {
+            let mut element = render_item(item_index, window, cx);
+            let size = element.layout_as_root(available_item_space, window, cx);
+            (element, size)
+        });
+        (element, size, accessed_entities)
+    } else {
+        let mut element = render_item(item_index, window, cx);
+        let size = element.layout_as_root(available_item_space, window, cx);
+        (element, size, FxHashSet::default())
+    }
 }
 
 /// Frame state used by the [List] element after layout.
@@ -250,6 +389,11 @@ enum ListItem {
     Measured {
         size: Size<Pixels>,
         focus_handle: Option<FocusHandle>,
+        /// The item's recorded draw output, if item render caching is enabled
+        /// and the item has been drawn. Stored in the tree so that every
+        /// existing invalidation path (splice, remeasure, width changes)
+        /// drops the recording along with the measured size.
+        render_cache: ItemCacheSlot,
     },
 }
 
@@ -274,6 +418,16 @@ impl ListItem {
             ListItem::Unmeasured { focus_handle, .. } | ListItem::Measured { focus_handle, .. } => {
                 focus_handle.clone()
             }
+        }
+    }
+
+    /// The item's cache slot, or a fresh empty one if the item has never been
+    /// measured. Reusing the slot keeps recordings written after the tree is
+    /// rebuilt (during paint) visible to the next frame's tree.
+    fn render_cache_slot(&self) -> ItemCacheSlot {
+        match self {
+            ListItem::Measured { render_cache, .. } => render_cache.clone(),
+            ListItem::Unmeasured { .. } => ItemCacheSlot::default(),
         }
     }
 
@@ -1005,6 +1159,7 @@ impl StateInner {
             measured_items.push(ListItem::Measured {
                 size,
                 focus_handle: item.focus_handle(),
+                render_cache: item.render_cache_slot(),
             });
         }
 
@@ -1016,6 +1171,7 @@ impl StateInner {
         available_width: Option<Pixels>,
         available_height: Pixels,
         padding: &Edges<Pixels>,
+        cache_items: bool,
         render_item: &mut RenderItemFn,
         window: &mut Window,
         cx: &mut App,
@@ -1056,12 +1212,47 @@ impl StateInner {
 
             // Use the previously cached height and focus handle if available
             let mut size = item.size();
+            let render_cache = item.render_cache_slot();
+            let visible = visible_height < available_height;
 
             // If we're within the visible area or the height wasn't cached, render and measure the item's element
-            if visible_height < available_height || size.is_none() {
+            if visible || size.is_none() {
                 let item_index = scroll_top.item_ix + ix;
-                let mut element = render_item(item_index, window, cx);
-                let element_size = element.layout_as_root(available_item_space, window, cx);
+
+                // When the item's recording from the previous draw is still
+                // valid, skip rendering: prepaint replays the recording if
+                // the item also hasn't moved.
+                let (element_size, layout) = if let Some(cache) = (cache_items && visible)
+                    .then(|| take_content_valid_cache(&render_cache, window))
+                    .flatten()
+                {
+                    let cache_size = cache.size;
+                    (
+                        cache_size,
+                        Some(ItemLayout::pending(item_index, cache, render_cache.clone())),
+                    )
+                } else {
+                    let (element, element_size, accessed_entities) = render_and_measure(
+                        item_index,
+                        available_item_space,
+                        cache_items,
+                        render_item,
+                        window,
+                        cx,
+                    );
+                    (
+                        element_size,
+                        visible.then(|| {
+                            ItemLayout::rendered(
+                                item_index,
+                                element,
+                                element_size,
+                                cache_items.then(|| render_cache.clone()),
+                                accessed_entities,
+                            )
+                        }),
+                    )
+                };
                 size = Some(element_size);
 
                 // If there's a pending scroll adjustment for the scroll-top
@@ -1089,12 +1280,8 @@ impl StateInner {
                     }
                 }
 
-                if visible_height < available_height {
-                    item_layouts.push_back(ItemLayout {
-                        index: item_index,
-                        element,
-                        size: element_size,
-                    });
+                if let Some(layout) = layout {
+                    item_layouts.push_back(layout);
                     if item.contains_focused(window, cx) {
                         rendered_focused_item = true;
                     }
@@ -1107,6 +1294,7 @@ impl StateInner {
             measured_items.push_back(ListItem::Measured {
                 size,
                 focus_handle: item.focus_handle(),
+                render_cache,
             });
         }
         rendered_height += padding.bottom;
@@ -1121,19 +1309,29 @@ impl StateInner {
                 cursor.prev();
                 if let Some(item) = cursor.item() {
                     let item_index = cursor.start().0;
-                    let mut element = render_item(item_index, window, cx);
-                    let element_size = element.layout_as_root(available_item_space, window, cx);
+                    let render_cache = item.render_cache_slot();
+                    let (element, element_size, accessed_entities) = render_and_measure(
+                        item_index,
+                        available_item_space,
+                        cache_items,
+                        render_item,
+                        window,
+                        cx,
+                    );
                     let focus_handle = item.focus_handle();
                     rendered_height += element_size.height;
                     measured_items.push_front(ListItem::Measured {
                         size: element_size,
                         focus_handle,
+                        render_cache: render_cache.clone(),
                     });
-                    item_layouts.push_front(ItemLayout {
-                        index: item_index,
+                    item_layouts.push_front(ItemLayout::rendered(
+                        item_index,
                         element,
-                        size: element_size,
-                    });
+                        element_size,
+                        cache_items.then_some(render_cache),
+                        accessed_entities,
+                    ));
                     if item.contains_focused(window, cx) {
                         rendered_focused_item = true;
                     }
@@ -1178,6 +1376,7 @@ impl StateInner {
                 measured_items.push_front(ListItem::Measured {
                     size,
                     focus_handle: item.focus_handle(),
+                    render_cache: item.render_cache_slot(),
                 });
             } else {
                 break;
@@ -1215,13 +1414,22 @@ impl StateInner {
             while let Some(item) = cursor.item() {
                 if item.contains_focused(window, cx) {
                     let item_index = cursor.start().0;
-                    let mut element = render_item(cursor.start().0, window, cx);
-                    let size = element.layout_as_root(available_item_space, window, cx);
-                    item_layouts.push_back(ItemLayout {
-                        index: item_index,
+                    let render_cache = item.render_cache_slot();
+                    let (element, size, accessed_entities) = render_and_measure(
+                        item_index,
+                        available_item_space,
+                        cache_items,
+                        render_item,
+                        window,
+                        cx,
+                    );
+                    item_layouts.push_back(ItemLayout::rendered(
+                        item_index,
                         element,
                         size,
-                    });
+                        cache_items.then_some(render_cache),
+                        accessed_entities,
+                    ));
                     break;
                 }
                 cursor.next();
@@ -1240,6 +1448,7 @@ impl StateInner {
         bounds: Bounds<Pixels>,
         padding: Edges<Pixels>,
         autoscroll: bool,
+        cache_items: bool,
         render_item: &mut RenderItemFn,
         window: &mut Window,
         cx: &mut App,
@@ -1256,6 +1465,7 @@ impl StateInner {
                 Some(bounds.size.width),
                 bounds.size.height,
                 &padding,
+                cache_items,
                 render_item,
                 window,
                 cx,
@@ -1266,11 +1476,60 @@ impl StateInner {
 
             // Only paint the visible items, if there is actually any space for them (taking padding into account)
             if bounds.size.height > padding.top + padding.bottom {
+                let available_item_space =
+                    size(bounds.size.width.into(), AvailableSpace::MinContent);
                 let mut item_origin = bounds.origin + Point::new(px(0.), padding.top);
                 item_origin.y -= layout_response.scroll_top.offset_in_item;
                 for item in &mut layout_response.item_layouts {
+                    let item_index = item.index;
+                    item.origin = item_origin;
                     window.with_content_mask(Some(ContentMask { bounds }), |window| {
-                        item.element.prepaint_at(item_origin, window, cx);
+                        let prepaint_start = window.prepaint_index();
+                        match &mut item.render {
+                            ItemRender::Element(element) => {
+                                if item.cache_slot.is_some() {
+                                    let ((), accessed_entities) = cx
+                                        .detect_accessed_entities_isolated(|cx| {
+                                            element.prepaint_at(item_origin, window, cx);
+                                        });
+                                    item.accessed_entities.extend(accessed_entities);
+                                } else {
+                                    element.prepaint_at(item_origin, window, cx);
+                                }
+                            }
+                            ItemRender::Pending(cache) if cache.origin == item_origin => {
+                                window.reuse_prepaint(cache.prepaint_range.clone());
+                                cx.entities.extend_accessed(&cache.accessed_entities);
+                                item.accessed_entities =
+                                    std::mem::take(&mut cache.accessed_entities);
+                                let paint_range = cache.paint_range.clone();
+                                item.render = ItemRender::Reused { paint_range };
+                            }
+                            ItemRender::Pending(_) => {
+                                // The item is unchanged but moved (the list
+                                // scrolled or an earlier item grew), so its
+                                // recording can't be replayed; render it at
+                                // the new origin.
+                                let ((element, element_size), accessed_entities) = cx
+                                    .detect_accessed_entities_isolated(|cx| {
+                                        let mut element = render_item(item_index, window, cx);
+                                        let element_size = element.layout_as_root(
+                                            available_item_space,
+                                            window,
+                                            cx,
+                                        );
+                                        element.prepaint_at(item_origin, window, cx);
+                                        (element, element_size)
+                                    });
+                                item.size = element_size;
+                                item.accessed_entities = accessed_entities;
+                                item.render = ItemRender::Element(element);
+                            }
+                            ItemRender::Reused { .. } => {
+                                debug_assert!(false, "list item prepainted twice");
+                            }
+                        }
+                        item.new_prepaint_range = Some(prepaint_start..window.prepaint_index());
                     });
 
                     if let Some(autoscroll_bounds) = window.take_autoscroll()
@@ -1467,6 +1726,7 @@ impl Element for List {
                         None,
                         available_height,
                         &padding,
+                        false,
                         &mut self.render_item,
                         window,
                         cx,
@@ -1547,16 +1807,32 @@ impl Element for List {
         let padding = style
             .padding
             .to_pixels(bounds.size.into(), window.rem_size());
-        let layout =
-            match state.prepaint_items(bounds, padding, true, &mut self.render_item, window, cx) {
-                Ok(layout) => layout,
-                Err(autoscroll_request) => {
-                    state.logical_scroll_top = Some(autoscroll_request);
-                    state
-                        .prepaint_items(bounds, padding, false, &mut self.render_item, window, cx)
-                        .unwrap()
-                }
-            };
+        let cache_items = self.cache_items && self.sizing_behavior == ListSizingBehavior::Auto;
+        let layout = match state.prepaint_items(
+            bounds,
+            padding,
+            true,
+            cache_items,
+            &mut self.render_item,
+            window,
+            cx,
+        ) {
+            Ok(layout) => layout,
+            Err(autoscroll_request) => {
+                state.logical_scroll_top = Some(autoscroll_request);
+                state
+                    .prepaint_items(
+                        bounds,
+                        padding,
+                        false,
+                        cache_items,
+                        &mut self.render_item,
+                        window,
+                        cx,
+                    )
+                    .unwrap()
+            }
+        };
 
         state.last_layout_bounds = Some(bounds);
         state.last_padding = Some(padding);
@@ -1576,7 +1852,40 @@ impl Element for List {
         let current_view = window.current_view();
         window.with_content_mask(Some(ContentMask { bounds }), |window| {
             for item in &mut prepaint.layout.item_layouts {
-                item.element.paint(window, cx);
+                let paint_start = window.paint_index();
+                match &mut item.render {
+                    ItemRender::Element(element) => {
+                        if item.cache_slot.is_some() {
+                            let ((), accessed_entities) = cx
+                                .detect_accessed_entities_isolated(|cx| {
+                                    element.paint(window, cx);
+                                });
+                            item.accessed_entities.extend(accessed_entities);
+                        } else {
+                            element.paint(window, cx);
+                        }
+                    }
+                    ItemRender::Reused { paint_range } => {
+                        window.reuse_paint(paint_range.clone());
+                    }
+                    ItemRender::Pending(_) => {
+                        debug_assert!(false, "list item painted without being prepainted");
+                        continue;
+                    }
+                }
+
+                if let (Some(cache_slot), Some(prepaint_range)) =
+                    (&item.cache_slot, item.new_prepaint_range.clone())
+                {
+                    *cache_slot.borrow_mut() = Some(ItemRenderCache {
+                        draw_serial: window.draw_serial(),
+                        origin: item.origin,
+                        size: item.size,
+                        prepaint_range,
+                        paint_range: paint_start..window.paint_index(),
+                        accessed_entities: std::mem::take(&mut item.accessed_entities),
+                    });
+                }
             }
         });
 
@@ -1701,12 +2010,13 @@ impl sum_tree::SeekTarget<'_, ListItemSummary, ListItemSummary> for Height {
 mod test {
 
     use gpui::{ScrollDelta, ScrollWheelEvent};
-    use std::cell::Cell;
+    use std::cell::{Cell, RefCell};
     use std::rc::Rc;
 
     use crate::{
-        self as gpui, AppContext, Bounds, Context, Element, FollowMode, IntoElement, ListState,
-        Render, Styled, TestAppContext, Window, canvas, div, list, point, px, size,
+        self as gpui, AppContext, Bounds, Context, Element, Entity, FollowMode, IntoElement,
+        ListState, Pixels, Render, Styled, TestAppContext, Window, canvas, div, list, point, px,
+        size,
     };
 
     #[gpui::test]
@@ -1848,6 +2158,111 @@ mod test {
         let offset = state.logical_scroll_top();
         assert_eq!(offset.item_ix, 0);
         assert_eq!(offset.offset_in_item, px(0.));
+    }
+
+    #[gpui::test]
+    fn test_item_render_caching(cx: &mut TestAppContext) {
+        struct ItemData {
+            height: Pixels,
+        }
+
+        struct CachingListView {
+            state: ListState,
+            items: Vec<Entity<ItemData>>,
+            render_counts: Rc<RefCell<Vec<usize>>>,
+        }
+
+        impl Render for CachingListView {
+            fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+                let items = self.items.clone();
+                let render_counts = self.render_counts.clone();
+                list(self.state.clone(), move |ix, _, cx| {
+                    render_counts.borrow_mut()[ix] += 1;
+                    let height = items[ix].read(cx).height;
+                    div().h(height).w_full().into_any()
+                })
+                .with_item_render_caching()
+                .w_full()
+                .h_full()
+            }
+        }
+
+        let render_counts = Rc::new(RefCell::new(vec![0; 5]));
+        let state = ListState::new(5, crate::ListAlignment::Top, px(10.));
+        let items = cx.update(|cx| {
+            (0..5)
+                .map(|_| cx.new(|_| ItemData { height: px(20.) }))
+                .collect::<Vec<_>>()
+        });
+        let view = cx.open_window(size(px(100.), px(100.)), {
+            let state = state.clone();
+            let items = items.clone();
+            let render_counts = render_counts.clone();
+            move |_, _| CachingListView {
+                state,
+                items,
+                render_counts,
+            }
+        });
+        cx.run_until_parked();
+        assert_eq!(*render_counts.borrow(), vec![1; 5], "first draw renders all");
+
+        // A redraw caused by something the items never accessed (the view
+        // itself) replays every item instead of re-rendering it.
+        view.update(cx, |_, _, cx| cx.notify()).unwrap();
+        cx.run_until_parked();
+        assert_eq!(
+            *render_counts.borrow(),
+            vec![1; 5],
+            "unrelated redraw reuses all items"
+        );
+
+        // Notifying an entity that one item's render accessed re-renders only
+        // that item.
+        cx.update(|cx| items[2].update(cx, |_, cx| cx.notify()));
+        cx.run_until_parked();
+        assert_eq!(
+            *render_counts.borrow(),
+            vec![1, 1, 2, 1, 1],
+            "only the item whose entity changed re-renders"
+        );
+
+        // Growing item 2 moves the items below it, so they re-render at their
+        // new origins while the items above are still replayed. Remeasure
+        // before notifying: the notify's effect flush draws immediately.
+        state.remeasure_items(2..3);
+        cx.update(|cx| {
+            items[2].update(cx, |item, cx| {
+                item.height = px(30.);
+                cx.notify();
+            })
+        });
+        cx.run_until_parked();
+        assert_eq!(
+            *render_counts.borrow(),
+            vec![1, 1, 3, 2, 2],
+            "items below a height change re-render, items above are reused"
+        );
+
+        // Splicing invalidates the replaced item.
+        state.splice(0..1, 1);
+        view.update(cx, |_, _, cx| cx.notify()).unwrap();
+        cx.run_until_parked();
+        assert_eq!(
+            *render_counts.borrow(),
+            vec![2, 1, 3, 2, 2],
+            "a spliced item re-renders, the rest are reused"
+        );
+
+        // Scrolling moves every item, so nothing can be replayed.
+        state.scroll_by(px(10.));
+        view.update(cx, |_, _, cx| cx.notify()).unwrap();
+        cx.run_until_parked();
+        assert_eq!(
+            *render_counts.borrow(),
+            vec![3, 2, 4, 3, 3],
+            "scrolling re-renders all visible items"
+        );
     }
 
     struct TestListView(ListState);

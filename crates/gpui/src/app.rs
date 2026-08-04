@@ -1077,6 +1077,23 @@ impl App {
         (result, entities_accessed_in_callback)
     }
 
+    /// Like [`Self::detect_accessed_entities`], but records *every* entity the
+    /// callback accesses, including ones that were already accessed earlier in
+    /// the current draw. Use this when the resulting set determines cache
+    /// validity: the difference-based variant would omit entities another part
+    /// of the frame happened to touch first, silently exempting them from
+    /// invalidating the cache.
+    pub(crate) fn detect_accessed_entities_isolated<R>(
+        &mut self,
+        callback: impl FnOnce(&mut App) -> R,
+    ) -> (R, FxHashSet<EntityId>) {
+        let prior = std::mem::take(self.entities.accessed_entities.get_mut());
+        let result = callback(self);
+        let accessed = self.entities.accessed_entities.get_mut().clone();
+        self.entities.accessed_entities.get_mut().extend(prior);
+        (result, accessed)
+    }
+
     pub(crate) fn record_entities_accessed(
         &mut self,
         window_handle: AnyWindowHandle,

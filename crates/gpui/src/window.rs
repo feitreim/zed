@@ -1103,6 +1103,11 @@ pub struct Window {
     pub(crate) tooltip_bounds: Option<TooltipBounds>,
     next_frame_callbacks: Rc<RefCell<Vec<FrameCallback>>>,
     pub(crate) dirty_views: FxHashSet<EntityId>,
+    /// Monotonically increasing count of completed calls to [`Self::draw`].
+    /// Cached prepaint/paint ranges index into `rendered_frame`, which only
+    /// survives one draw, so range caches record the serial they were captured
+    /// at and are valid only on the immediately following draw.
+    draw_serial: u64,
     focus_listeners: SubscriberSet<(), AnyWindowFocusListener>,
     pub(crate) focus_lost_listeners: SubscriberSet<(), AnyObserver>,
     default_prevented: bool,
@@ -1842,6 +1847,7 @@ impl Window {
             next_tooltip_id: TooltipId::default(),
             tooltip_bounds: None,
             dirty_views: FxHashSet::default(),
+            draw_serial: 0,
             focus_listeners: SubscriberSet::new(),
             focus_lost_listeners: SubscriberSet::new(),
             default_prevented: true,
@@ -1925,14 +1931,22 @@ impl ContentMask<Pixels> {
 
 impl Window {
     fn mark_view_dirty(&mut self, view_id: EntityId) {
+        // Record the notified entity itself, which may not be a rendered view
+        // (and then has no dispatch node below): caches keyed on accessed
+        // entities, like the list element's item render cache, consult
+        // `dirty_views` to decide whether recorded output is still valid.
+        if !self.dirty_views.insert(view_id) {
+            // All ancestors were already marked when this entity was.
+            return;
+        }
         // Mark ancestor views as dirty. If already in the `dirty_views` set, then all its ancestors
         // should already be dirty.
-        for view_id in self
+        for ancestor_id in self
             .rendered_frame
             .dispatch_tree
             .view_path_reversed(view_id)
         {
-            if !self.dirty_views.insert(view_id) {
+            if ancestor_id != view_id && !self.dirty_views.insert(ancestor_id) {
                 break;
             }
         }
@@ -2824,6 +2838,7 @@ impl Window {
         // leak into a later frame across enable/disable of frame tracing.
         let frame_dirty = self.invalidator.take_frame_dirty();
         let draw_started_at = profiler::frame_trace_enabled().then(Instant::now);
+        self.draw_serial += 1;
 
         // Set up the per-App arena for element allocation during this draw.
         // This ensures that multiple test Apps have isolated arenas.
@@ -3295,6 +3310,14 @@ impl Window {
         let mut sorted_indices = (0..deferred_count).collect::<SmallVec<[_; 8]>>();
         sorted_indices.sort_by_key(|ix| self.next_frame.deferred_draws[*ix].priority);
         sorted_indices
+    }
+
+    /// The serial number of the draw currently in progress (or, between
+    /// draws, of the last completed draw). Prepaint/paint range caches are
+    /// only valid when they were recorded on the draw immediately preceding
+    /// the current one, since `rendered_frame` is replaced on every draw.
+    pub(crate) fn draw_serial(&self) -> u64 {
+        self.draw_serial
     }
 
     pub(crate) fn prepaint_index(&self) -> PrepaintStateIndex {
