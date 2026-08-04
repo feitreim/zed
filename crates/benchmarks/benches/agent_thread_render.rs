@@ -152,6 +152,31 @@ fn agent_generating_second_over_acp(layout: &&str, cx: &mut BenchAppContext) {
     harness.shutdown(cx);
 }
 
+/// The cost of redrawing the agent panel itself. Each iteration invalidates
+/// the panel's root view and draws one frame, so the panel's whole subtree
+/// (chrome, message list, streamed markdown) re-renders while sibling views
+/// like the center editor replay their caches. This is the draw that a
+/// panel-internal animation frame or streaming tick pays for, so it's the
+/// number view caching inside the thread should shrink.
+#[gpui::bench(
+    inputs = layouts(),
+    group = "Agent panel redraw",
+    input_name = "layout",
+    sample_size = 20
+)]
+fn agent_panel_redraw(layout: &&str, cx: &mut BenchAppContext) {
+    let harness = Harness::setup(Layout::from_name(layout), cx);
+    harness.begin_turn(cx);
+    harness.stream_initial_response(cx);
+
+    cx.bench_iter(|cx| {
+        cx.update(|cx| harness.panel.update(cx, |_, cx| cx.notify()));
+        harness.simulate_frame(cx);
+    });
+
+    harness.shutdown(cx);
+}
+
 #[derive(Clone, Copy, PartialEq)]
 struct Layout {
     /// Whether a full-size editor is open in the center pane. The center pane
@@ -510,6 +535,7 @@ fn source_file() -> String {
 gpui::bench_group!(
     benches,
     agent_animation_frame,
+    agent_panel_redraw,
     agent_stream_chunk,
     agent_generating_second,
     agent_generating_second_over_acp
